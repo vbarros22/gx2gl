@@ -70,7 +70,8 @@ jobs:
             cmake -S examples -B build-test -G Ninja \
               -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/WiiU.cmake" \
               -DCMAKE_BUILD_TYPE=Release \
-              -DGX2GL_CAFEGLSL_ROOT="$PWD/cafeglsl" &&
+              -DGX2GL_CAFEGLSL_ROOT="$PWD/cafeglsl" \
+              -DGX2GL_BUILD_ID="${GITHUB_SHA::7}" &&
             cmake --build build-test
           } 2>&1 | tee ci-build.log
           mkdir -p artifacts

@@ -12,7 +12,8 @@
  * Uses interface blocks, mat4 uniforms shared by the vertex and geometry
  * shaders, uniforms only the geometry shader declares, indexed draws and depth.
  *
- * GamePad: A toggles the explosion, B toggles the normals, X pauses rotation.
+ * GamePad: A toggles the explosion, B toggles the normals, X pauses rotation,
+ * Y toggles depth testing.
  * Log: sd:/gx2gl-gs-demo.log
  */
 #include "../common/example_util.h"
@@ -24,6 +25,10 @@
 
 #include <cmath>
 #include <vector>
+
+#ifndef GX2GL_BUILD_ID
+#define GX2GL_BUILD_ID "local"
+#endif
 
 using example::Log;
 using example::Mat4;
@@ -252,7 +257,7 @@ int main(int argc, char **argv)
    WHBLogCafeInit();
    WHBLogUdpInit();
    example::OpenLog("gx2gl-gs-demo.log");
-   Log("gx2gl geometry shader demo started");
+   Log("gx2gl geometry shader demo, build %s", GX2GL_BUILD_ID);
 
    GX2GL_Context context = GX2GL_CreateContext();
    if (!context) {
@@ -286,7 +291,7 @@ int main(int argc, char **argv)
    Log("torus: %d indices, uExplode location %d", torus.index_count, explode_location);
    example::LogGLError("setup");
 
-   bool explode = true, normals = true, rotate = true;
+   bool explode = true, normals = true, rotate = true, depth = true;
    float angle = 0.0f, time = 0.0f;
    uint32_t frame = 0;
    while (WHBProcIsRunning()) {
@@ -294,8 +299,10 @@ int main(int argc, char **argv)
       if (pressed & VPAD_BUTTON_A) explode = !explode;
       if (pressed & VPAD_BUTTON_B) normals = !normals;
       if (pressed & VPAD_BUTTON_X) rotate = !rotate;
-      if (pressed & (VPAD_BUTTON_A | VPAD_BUTTON_B | VPAD_BUTTON_X))
-         Log("frame %u: explode %d, normals %d, rotate %d", frame, explode, normals, rotate);
+      if (pressed & VPAD_BUTTON_Y) depth = !depth;
+      if (pressed & (VPAD_BUTTON_A | VPAD_BUTTON_B | VPAD_BUTTON_X | VPAD_BUTTON_Y))
+         Log("frame %u: explode %d, normals %d, rotate %d, depth %d", frame, explode, normals,
+             rotate, depth);
       if (rotate)
          angle += 0.012f;
       time += 1.0f / 60.0f;
@@ -303,7 +310,10 @@ int main(int argc, char **argv)
       const Mat4 model = Mat4::RotationY(angle) * Mat4::RotationX(0.6f + angle * 0.5f);
       glClearColor(0.08f, 0.08f, 0.11f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-      glEnable(GL_DEPTH_TEST);
+      if (depth)
+         glEnable(GL_DEPTH_TEST);
+      else
+         glDisable(GL_DEPTH_TEST);
 
       if (torus_program) {
          glUseProgram(torus_program);

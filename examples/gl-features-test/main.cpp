@@ -29,6 +29,10 @@
 #include <initializer_list>
 #include <vector>
 
+#ifndef GX2GL_BUILD_ID
+#define GX2GL_BUILD_ID "local"
+#endif
+
 using example::Log;
 
 #ifndef GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER
@@ -318,7 +322,7 @@ int main(int argc, char **argv)
    WHBLogCafeInit();
    WHBLogUdpInit();
    example::OpenLog("gx2gl-features-test.log");
-   Log("gx2gl feature test started");
+   Log("gx2gl feature test, build %s", GX2GL_BUILD_ID);
 
    GX2GL_Context context = GX2GL_CreateContext();
    if (!context) {
@@ -462,7 +466,7 @@ int main(int argc, char **argv)
    uint32_t frame = 0;
    while (WHBProcIsRunning()) {
       example::PollGamePad();
-      glClearColor(0.12f, 0.12f, 0.16f, 1.0f);
+      glClearColor(0.35f, 0.35f, 0.4f, 1.0f);   /* mid grey: black shapes stay visible */
       glClear(GL_COLOR_BUFFER_BIT);
       for (const Panel &panel : panels) {
          if (!panel.program)
