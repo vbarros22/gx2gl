@@ -1,16 +1,19 @@
 /* gx2gl geometry shader test, written against the OpenGL API only.
  *
- * Three panels, left to right, on the TV (mirrored to the GamePad):
- *   A  plain vertex + fragment program (control)
- *   B  a triangle through a pass-through geometry shader that scales it with a
- *      uniform only the geometry shader declares (uGeometryScale = 1.0)
- *   C  four points expanded into squares by a geometry shader that reads its half
- *      size from a uniform buffer and its tint from a uniform the vertex shader
- *      also declares (uTint = white). Black squares mean the tint did not reach
- *      the geometry shader; no squares mean the buffer did not.
+ * Six panels on the TV (mirrored to the GamePad), each adding one feature:
  *
- * B starts after ~2 s and C after ~4 s. Every step goes to sd:/gx2gl-gs-test.log,
- * reopened per line so it survives a GPU hang.
+ *   top row:     A   no geometry shader (control)
+ *                B1  pass-through GS, no uniforms anywhere
+ *                B2  pass-through GS scaled by a uniform only the GS declares
+ *   bottom row:  B3  pass-through GS, vertex shader reads a uniform
+ *                C1  points expanded to squares, no uniforms
+ *                C2  points to squares sized by a uniform buffer and tinted by a
+ *                    uniform the vertex shader also declares (black = tint lost,
+ *                    missing = buffer lost)
+ *
+ * The geometry panels start one second apart from frame 120, in that order, so a
+ * hang or a glitch points at the feature that was just added. Every step goes to
+ * sd:/gx2gl-gs-test.log, reopened per line so it survives a GPU hang.
  */
 #include <gl/gl.h>
 #include <gx2gl/present.h>
@@ -56,7 +59,18 @@ static void LogGLError(const char *where)
       Log("  GL error 0x%04x after %s", error, where);
 }
 
-static const char kVertexSource[] = R"(
+static const char kPlainVertexSource[] = R"(
+#version 330 core
+layout(location = 0) in vec2 aPosition;
+layout(location = 1) in vec4 aColor;
+out vec4 vColor;
+void main() {
+   vColor = aColor;
+   gl_Position = vec4(aPosition, 0.0, 1.0);
+}
+)";
+
+static const char kTintVertexSource[] = R"(
 #version 330 core
 layout(location = 0) in vec2 aPosition;
 layout(location = 1) in vec4 aColor;
@@ -64,8 +78,7 @@ out vec4 vColor;
 uniform vec4 uTint;
 void main() {
    vColor = aColor;
-   // uTint.w is 1.0, so this keeps the position; it makes uTint a vertex
-   // uniform too, which the geometry shader must then mirror.
+   // uTint.w is 1.0: the position only survives if the uniform arrives.
    gl_Position = vec4(aPosition * uTint.w, 0.0, 1.0);
 }
 )";
@@ -90,6 +103,22 @@ layout(triangles) in;
 layout(triangle_strip, max_vertices = 3) out;
 in vec4 vColor[];
 out vec4 gColor;
+void main() {
+   for (int i = 0; i < 3; ++i) {
+      gColor = vColor[i];
+      gl_Position = gl_in[i].gl_Position;
+      EmitVertex();
+   }
+   EndPrimitive();
+}
+)";
+
+static const char kScaledGeometrySource[] = R"(
+#version 330 core
+layout(triangles) in;
+layout(triangle_strip, max_vertices = 3) out;
+in vec4 vColor[];
+out vec4 gColor;
 uniform float uGeometryScale;
 void main() {
    vec4 center = (gl_in[0].gl_Position + gl_in[1].gl_Position + gl_in[2].gl_Position) / 3.0;
@@ -102,7 +131,25 @@ void main() {
 }
 )";
 
-static const char kExpandGeometrySource[] = R"(
+static const char kPlainExpandGeometrySource[] = R"(
+#version 330 core
+layout(points) in;
+layout(triangle_strip, max_vertices = 4) out;
+in vec4 vColor[];
+out vec4 gColor;
+void main() {
+   const vec2 halfSize = vec2(0.05, 0.08);
+   for (int i = 0; i < 4; ++i) {
+      vec2 corner = vec2(float(i & 1), float(i >> 1)) * 2.0 - 1.0;
+      gColor = vColor[0];
+      gl_Position = gl_in[0].gl_Position + vec4(corner * halfSize, 0.0, 0.0);
+      EmitVertex();
+   }
+   EndPrimitive();
+}
+)";
+
+static const char kFullExpandGeometrySource[] = R"(
 #version 330 core
 layout(points) in;
 layout(triangle_strip, max_vertices = 4) out;
@@ -180,22 +227,44 @@ static Mesh CreateMesh(const float *vertices, GLsizei count)
    return mesh;
 }
 
-/* x, y, r, g, b, a */
-static const float kTriangleA[] = {
-   -0.95f, -0.6f, 1, 0, 0, 1,
-   -0.40f, -0.6f, 0, 1, 0, 1,
-   -0.675f, 0.6f, 0, 0, 1, 1,
-};
-static const float kTriangleB[] = {
-   -0.275f, -0.6f, 1, 0, 0, 1,
-   0.275f, -0.6f, 0, 1, 0, 1,
-   0.0f, 0.6f, 0, 0, 1, 1,
-};
-static const float kPointsC[] = {
-   0.52f, -0.35f, 1, 1, 0, 1,
-   0.82f, -0.35f, 0, 1, 1, 1,
-   0.52f, 0.35f, 1, 0, 1, 1,
-   0.82f, 0.35f, 1, 1, 1, 1,
+/* Panel centres: three columns, two rows. */
+static void PanelCenter(int panel, float &x, float &y)
+{
+   x = -0.66f + 0.66f * (float)(panel % 3);
+   y = panel < 3 ? 0.5f : -0.5f;
+}
+
+static Mesh CreateTriangle(int panel)
+{
+   float x, y;
+   PanelCenter(panel, x, y);
+   const float vertices[] = {
+      x - 0.25f, y - 0.35f, 1, 0, 0, 1,
+      x + 0.25f, y - 0.35f, 0, 1, 0, 1,
+      x, y + 0.35f, 0, 0, 1, 1,
+   };
+   return CreateMesh(vertices, 3);
+}
+
+static Mesh CreatePoints(int panel)
+{
+   float x, y;
+   PanelCenter(panel, x, y);
+   const float vertices[] = {
+      x - 0.13f, y - 0.2f, 1, 1, 0, 1,
+      x + 0.13f, y - 0.2f, 0, 1, 1, 1,
+      x - 0.13f, y + 0.2f, 1, 0, 1, 1,
+      x + 0.13f, y + 0.2f, 1, 1, 1, 1,
+   };
+   return CreateMesh(vertices, 4);
+}
+
+struct Panel {
+   const char *name;
+   GLuint program;
+   Mesh mesh;
+   GLenum primitive;
+   uint32_t first_frame;
 };
 
 int main(int argc, char **argv)
@@ -218,58 +287,56 @@ int main(int argc, char **argv)
    }
    Log("GL_VERSION %s", (const char *)glGetString(GL_VERSION));
 
-   GLuint vs = CompileShader("vs", GL_VERTEX_SHADER, kVertexSource);
+   GLuint plain_vs = CompileShader("plain-vs", GL_VERTEX_SHADER, kPlainVertexSource);
+   GLuint tint_vs = CompileShader("tint-vs", GL_VERTEX_SHADER, kTintVertexSource);
    GLuint fs = CompileShader("fs", GL_FRAGMENT_SHADER, kFragmentSource);
    GLuint gfs = CompileShader("gs-fs", GL_FRAGMENT_SHADER, kGeometryFragmentSource);
-   GLuint gs_b = CompileShader("gs-B", GL_GEOMETRY_SHADER, kPassThroughGeometrySource);
-   GLuint gs_c = CompileShader("gs-C", GL_GEOMETRY_SHADER, kExpandGeometrySource);
+   GLuint pass_gs = CompileShader("pass-gs", GL_GEOMETRY_SHADER, kPassThroughGeometrySource);
+   GLuint scaled_gs = CompileShader("scaled-gs", GL_GEOMETRY_SHADER, kScaledGeometrySource);
+   GLuint plain_expand_gs =
+      CompileShader("plain-expand-gs", GL_GEOMETRY_SHADER, kPlainExpandGeometrySource);
+   GLuint full_expand_gs =
+      CompileShader("full-expand-gs", GL_GEOMETRY_SHADER, kFullExpandGeometrySource);
 
-   GLuint program_a = LinkProgram("A", vs, 0, fs, false);
-   GLuint program_b = LinkProgram("B", vs, gs_b, gfs, true);
-   GLuint program_c = LinkProgram("C", vs, gs_c, gfs, true);
+   Panel panels[] = {
+      {"A", LinkProgram("A", plain_vs, 0, fs, false), CreateTriangle(0), GL_TRIANGLES, 0},
+      {"B1", LinkProgram("B1", plain_vs, pass_gs, gfs, true), CreateTriangle(1), GL_TRIANGLES, 120},
+      {"B2", LinkProgram("B2", plain_vs, scaled_gs, gfs, true), CreateTriangle(2), GL_TRIANGLES, 180},
+      {"B3", LinkProgram("B3", tint_vs, pass_gs, gfs, true), CreateTriangle(3), GL_TRIANGLES, 240},
+      {"C1", LinkProgram("C1", plain_vs, plain_expand_gs, gfs, true), CreatePoints(4), GL_POINTS, 300},
+      {"C2", LinkProgram("C2", tint_vs, full_expand_gs, gfs, true), CreatePoints(5), GL_POINTS, 360},
+   };
+   LogGLError("mesh setup");
 
-   GLint tint_a = program_a ? glGetUniformLocation(program_a, "uTint") : -1;
-   GLint tint_b = program_b ? glGetUniformLocation(program_b, "uTint") : -1;
-   GLint scale_b = program_b ? glGetUniformLocation(program_b, "uGeometryScale") : -1;
-   GLint tint_c = program_c ? glGetUniformLocation(program_c, "uTint") : -1;
-   Log("locations: A uTint=%d, B uTint=%d uGeometryScale=%d, C uTint=%d",
-       tint_a, tint_b, scale_b, tint_c);
+   for (Panel &panel : panels) {
+      if (!panel.program)
+         continue;
+      glUseProgram(panel.program);
+      const GLint tint = glGetUniformLocation(panel.program, "uTint");
+      const GLint scale = glGetUniformLocation(panel.program, "uGeometryScale");
+      if (tint >= 0)
+         glUniform4f(tint, 1.0f, 1.0f, 1.0f, 1.0f);
+      if (scale >= 0)
+         glUniform1f(scale, 1.0f);
+      Log("%s: uTint location %d, uGeometryScale location %d", panel.name, tint, scale);
+   }
 
    GLuint sprite_ubo = 0;
-   if (program_c) {
-      GLuint block = glGetUniformBlockIndex(program_c, "SpriteData");
+   if (GLuint program = panels[5].program) {
+      GLuint block = glGetUniformBlockIndex(program, "SpriteData");
       GLint referenced = -1;
-      glGetActiveUniformBlockiv(program_c, block, GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER,
+      glGetActiveUniformBlockiv(program, block, GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER,
                                 &referenced);
-      Log("C: SpriteData block index %u, referenced by GS %d", block, referenced);
-      glUniformBlockBinding(program_c, block, 2);
-      const float half_size[4] = {0.07f, 0.12f, 0.0f, 0.0f};
+      Log("C2: SpriteData block index %u, referenced by GS %d", block, referenced);
+      glUniformBlockBinding(program, block, 2);
+      const float half_size[4] = {0.05f, 0.08f, 0.0f, 0.0f};
       glGenBuffers(1, &sprite_ubo);
       glBindBuffer(GL_UNIFORM_BUFFER, sprite_ubo);
       glBufferData(GL_UNIFORM_BUFFER, sizeof(half_size), half_size, GL_STATIC_DRAW);
       glBindBufferBase(GL_UNIFORM_BUFFER, 2, sprite_ubo);
-      LogGLError("SpriteData setup");
-   }
-
-   for (GLuint program : {program_a, program_b, program_c}) {
-      if (!program)
-         continue;
-      glUseProgram(program);
-      GLint tint = glGetUniformLocation(program, "uTint");
-      if (tint >= 0)
-         glUniform4f(tint, 1.0f, 1.0f, 1.0f, 1.0f);
-   }
-   if (program_b) {
-      glUseProgram(program_b);
-      glUniform1f(scale_b, 1.0f);
    }
    LogGLError("uniform setup");
-
-   Mesh triangle_a = CreateMesh(kTriangleA, 3);
-   Mesh triangle_b = CreateMesh(kTriangleB, 3);
-   Mesh points_c = CreateMesh(kPointsC, 4);
-   LogGLError("mesh setup");
-   Log("setup done: A always, B from frame 120, C from frame 240");
+   Log("setup done: geometry panels start at frames 120, 180, 240, 300, 360");
 
    uint32_t frame = 0;
    while (WHBProcIsRunning()) {
@@ -280,32 +347,22 @@ int main(int argc, char **argv)
       VPADReadError vpad_error;
       VPADRead(VPAD_CHAN_0, &vpad, 1, &vpad_error);
 
-      const bool first_b = frame == 120 && program_b;
-      const bool first_c = frame == 240 && program_c;
-      if (first_b)
-         Log("frame %u: first B draw", frame);
-      if (first_c)
-         Log("frame %u: first C draw", frame);
-
+      bool first_draw = false;
       glClearColor(0.12f, 0.12f, 0.16f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT);
-      if (program_a) {
-         glUseProgram(program_a);
-         glBindVertexArray(triangle_a.vao);
-         glDrawArrays(GL_TRIANGLES, 0, triangle_a.count);
-      }
-      if (frame >= 120 && program_b) {
-         glUseProgram(program_b);
-         glBindVertexArray(triangle_b.vao);
-         glDrawArrays(GL_TRIANGLES, 0, triangle_b.count);
-      }
-      if (frame >= 240 && program_c) {
-         glUseProgram(program_c);
-         glBindVertexArray(points_c.vao);
-         glDrawArrays(GL_POINTS, 0, points_c.count);
+      for (const Panel &panel : panels) {
+         if (!panel.program || frame < panel.first_frame)
+            continue;
+         if (frame == panel.first_frame) {
+            Log("frame %u: first %s draw", frame, panel.name);
+            first_draw = true;
+         }
+         glUseProgram(panel.program);
+         glBindVertexArray(panel.mesh.vao);
+         glDrawArrays(panel.primitive, 0, panel.mesh.count);
       }
       glBindVertexArray(0);
-      if (frame == 0 || first_b || first_c) {
+      if (first_draw) {
          glFinish();
          LogGLError("draw");
          Log("frame %u: finished on the GPU", frame);
