@@ -349,7 +349,11 @@ static bool parse_interface_declaration(const std::string &line,
       size = (size * 10) + digit;
     }
     if (size <= 0) {
-      return false;
+      /* "name[]": only geometry shader inputs, one element per input vertex. */
+      if (line.find_first_not_of(" \t\r", name_end + 1u) != close) {
+        return false;
+      }
+      size = 1;
     }
     decl->array_size = size;
   }
@@ -451,6 +455,8 @@ static const char *shader_stage_name(GLenum shader_type) {
     return "vertex";
   case GL_FRAGMENT_SHADER:
     return "fragment";
+  case GL_GEOMETRY_SHADER:
+    return "geometry";
   default:
     return "shader";
   }
@@ -1272,8 +1278,13 @@ static char *lower_source_for_cafeglsl(const char *source,
           bool *used_locations =
               interface_decl.storage == "out" ? used_output_locations
                                               : used_input_locations;
+          /* A geometry shader input array has one element per input vertex,
+           * all at the same location as the vertex shader output.
+           */
+          const bool per_vertex_array = shader_type == GL_GEOMETRY_SHADER &&
+                                        interface_decl.storage == "in";
           int span = shader_type_location_span(interface_decl.type) *
-                     interface_decl.array_size;
+                     (per_vertex_array ? 1 : interface_decl.array_size);
           int max_locations =
               shader_type == GL_FRAGMENT_SHADER &&
                       interface_decl.storage == "out"

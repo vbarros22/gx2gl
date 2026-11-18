@@ -1,0 +1,95 @@
+name: Build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEVKITPRO: /opt/devkitpro
+  DEVKITPPC: /opt/devkitpro/devkitPPC
+  # CafeGLSL with geometry shader support, linked statically into gx2gl.
+  CAFEGLSL_REPOSITORY: vbarros22/CafeGLSL
+  CAFEGLSL_REF: geometry-shaders
+
+jobs:
+  wiiu:
+    name: Wii U (library and GS test app)
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitppc:latest
+    steps:
+      - name: Install dependencies
+        run: |
+          rm -f /etc/apt/sources.list.d/devkitpro.list
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git pkg-config ninja-build cmake \
+            python3-pip python3-setuptools python3-mako python3-yaml \
+            python3-packaging bison flex
+          pip3 install --no-cache-dir 'meson>=1.4' \
+            || pip3 install --no-cache-dir --break-system-packages 'meson>=1.4'
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CAFEGLSL_REPOSITORY }}
+          ref: ${{ env.CAFEGLSL_REF }}
+          path: cafeglsl
+
+      - name: Put the toolchain on PATH
+        run: |
+          echo "$DEVKITPPC/bin" >> "$GITHUB_PATH"
+          echo "$DEVKITPRO/portlibs/wiiu/bin" >> "$GITHUB_PATH"
+          echo "$DEVKITPRO/portlibs/ppc/bin" >> "$GITHUB_PATH"
+
+      - name: Build CafeGLSL
+        shell: bash
+        working-directory: cafeglsl
+        run: |
+          set -o pipefail
+          {
+            ./cafecompiler/meson-cross.sh wiiu ppccross-ci build-cafe \
+              -Dtools= -Dgallium-drivers=r600 -Dvulkan-drivers= \
+              -Dglx=disabled -Degl=disabled -Dplatforms= -Dllvm=disabled \
+              -Db_sanitize=none -Db_lundef=false -Db_staticpic=false -Db_lto=false \
+              --buildtype=release &&
+            ninja -C build-cafe cafecompiler/libcafeglsl.a
+          } 2>&1 | tee ../ci-build.log
+
+      - name: Build gx2gl and the GS test app
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            cmake -S examples/gl-gs-test -B build-test -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/WiiU.cmake" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DGX2GL_CAFEGLSL_ROOT="$PWD/cafeglsl" &&
+            cmake --build build-test
+          } 2>&1 | tee ci-build.log
+          mkdir -p artifacts
+          cp build-test/gx2gl/libgl33_gx2_core.a artifacts/
+          cp build-test/*.rpx build-test/*.wuhb artifacts/
+
+      - name: Report failure as annotations
+        if: failure()
+        shell: bash
+        run: |
+          # Surface compiler errors through the check-run annotations API.
+          f=ci-build.log
+          [ -f "$f" ] || exit 0
+          { grep -n -B3 -A8 -E "error|Error |FAILED|undefined reference" "$f" | head -150
+            echo "----- tail -----"; tail -40 "$f"; } > ci-excerpt.txt || true
+          msg=$(sed -e 's/%/%25/g' -e 's/\r/%0D/g' ci-excerpt.txt | awk 'BEGIN{ORS="%0A"} {print}')
+          echo "::error title=$f::$msg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gx2gl-gs-test
+          path: artifacts/
+          if-no-files-found: error
