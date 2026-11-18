@@ -15,6 +15,7 @@
 #include <gl/gl.h>
 #include <gx2gl/present.h>
 
+#include <vpad/input.h>
 #include <whb/log.h>
 #include <whb/log_cafe.h>
 #include <whb/log_udp.h>
@@ -272,6 +273,13 @@ int main(int argc, char **argv)
 
    uint32_t frame = 0;
    while (WHBProcIsRunning()) {
+      /* Aroma's button combos (screenshots and the like) only see input the
+       * app reads, so poll the GamePad even though the test ignores it.
+       */
+      VPADStatus vpad;
+      VPADReadError vpad_error;
+      VPADRead(VPAD_CHAN_0, &vpad, 1, &vpad_error);
+
       const bool first_b = frame == 120 && program_b;
       const bool first_c = frame == 240 && program_c;
       if (first_b)
