@@ -81,12 +81,13 @@ Things to know:
 
 | Works (run on hardware) | Not tested on hardware yet | Not supported |
 |---|---|---|
-| `points` and `triangles` input | `lines`, `triangles_adjacency`, `lines_adjacency` input | transform feedback with a geometry shader |
-| `triangle_strip` output | `points` and `line_strip` output | `gl_PrimitiveIDIn`, `invocations` > 1 |
-| loose uniforms in one or both stages | `mat4` uniforms shared by VS and GS | `EmitStreamVertex` / multiple streams |
-| uniform buffers in the geometry shader | textures in the geometry shader | |
-| | interface blocks between stages | |
-| | large shaders, many outputs, high `max_vertices`; performance | |
+| `points`, `lines`, `triangles` and `triangles_adjacency` input | `lines_adjacency` input | transform feedback with a geometry shader |
+| `triangle_strip` and `line_strip` output | `points` output | `gl_PrimitiveIDIn`, `invocations` > 1 |
+| loose uniforms (`vec4`, `mat4`) in one or both stages, shared by name | large shaders, many outputs, high `max_vertices` | `EmitStreamVertex` / multiple streams |
+| uniform buffers in the geometry shader, and at their bindings in VS/FS | performance | |
+| textures in the geometry shader | | |
+| `out`/`in` arrays and interface blocks between stages | | |
+| depth testing with a geometry shader | | |
 
 ## When something goes wrong
 
@@ -105,5 +106,7 @@ Things to know:
   shared uniforms and uniform buffers. Press A for "serialized" mode.
 - `examples/gl-features-test`: textures in the geometry shader, lines,
   adjacency, interface blocks, matrices, and uniform buffer slots.
+- `examples/gl-matrix-test`: `mat4` and `vec4` uniforms with and without a
+  geometry shader, one triangle per case.
 - `examples/gl-gs-demo`: an exploding torus with its normals drawn as lines,
   after the geometry shader chapter of LearnOpenGL.
