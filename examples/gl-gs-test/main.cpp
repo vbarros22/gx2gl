@@ -1,18 +1,20 @@
 /* gx2gl geometry shader test, written against the OpenGL API only.
  *
- * Six panels on the TV (mirrored to the GamePad), each adding one feature:
+ * Eight panels on the TV (mirrored to the GamePad), each adding one feature:
  *
  *   top row:     A   no geometry shader (control)
  *                B1  pass-through GS, no uniforms anywhere
  *                B2  pass-through GS scaled by a uniform only the GS declares
- *   bottom row:  B3  pass-through GS, vertex shader reads a uniform
+ *   middle row:  B3  pass-through GS, vertex shader reads a uniform
  *                C1  points expanded to squares, no uniforms
- *                C2  points to squares sized by a uniform buffer and tinted by a
- *                    uniform the vertex shader also declares (black = tint lost,
- *                    missing = buffer lost)
+ *                C2  squares sized by a uniform buffer, tinted by a uniform the
+ *                    vertex shader also declares
+ *   bottom row:  C3  as C2 without the buffer (tint shared by VS and GS only)
+ *                C4  as C2 without the tint (buffer only, plain vertex shader)
  *
- * The geometry panels start one second apart from frame 120, in that order, so a
- * hang or a glitch points at the feature that was just added. Every step goes to
+ * The geometry panels start one second apart from frame 120. Press A on the
+ * GamePad to toggle "serialized" mode, which waits for the GPU after every draw;
+ * a white square in the bottom-right corner shows it is on. Every step goes to
  * sd:/gx2gl-gs-test.log, reopened per line so it survives a GPU hang.
  */
 #include <gl/gl.h>
@@ -170,6 +172,45 @@ void main() {
 }
 )";
 
+static const char kTintExpandGeometrySource[] = R"(
+#version 330 core
+layout(points) in;
+layout(triangle_strip, max_vertices = 4) out;
+in vec4 vColor[];
+out vec4 gColor;
+uniform vec4 uTint;
+void main() {
+   const vec2 halfSize = vec2(0.05, 0.08);
+   for (int i = 0; i < 4; ++i) {
+      vec2 corner = vec2(float(i & 1), float(i >> 1)) * 2.0 - 1.0;
+      gColor = vColor[0] * vec4(uTint.rgb, 1.0);
+      gl_Position = gl_in[0].gl_Position + vec4(corner * halfSize, 0.0, 0.0);
+      EmitVertex();
+   }
+   EndPrimitive();
+}
+)";
+
+static const char kBufferExpandGeometrySource[] = R"(
+#version 330 core
+layout(points) in;
+layout(triangle_strip, max_vertices = 4) out;
+in vec4 vColor[];
+out vec4 gColor;
+layout(std140) uniform SpriteData {
+   vec4 halfSize;
+};
+void main() {
+   for (int i = 0; i < 4; ++i) {
+      vec2 corner = vec2(float(i & 1), float(i >> 1)) * 2.0 - 1.0;
+      gColor = vColor[0];
+      gl_Position = gl_in[0].gl_Position + vec4(corner * halfSize.xy, 0.0, 0.0);
+      EmitVertex();
+   }
+   EndPrimitive();
+}
+)";
+
 static GLuint CompileShader(const char *name, GLenum type, const char *source)
 {
    GLuint shader = glCreateShader(type);
@@ -227,11 +268,11 @@ static Mesh CreateMesh(const float *vertices, GLsizei count)
    return mesh;
 }
 
-/* Panel centres: three columns, two rows. */
+/* Panel centres: three columns, three rows. */
 static void PanelCenter(int panel, float &x, float &y)
 {
    x = -0.66f + 0.66f * (float)(panel % 3);
-   y = panel < 3 ? 0.5f : -0.5f;
+   y = 0.66f - 0.66f * (float)(panel / 3);
 }
 
 static Mesh CreateTriangle(int panel)
@@ -239,9 +280,9 @@ static Mesh CreateTriangle(int panel)
    float x, y;
    PanelCenter(panel, x, y);
    const float vertices[] = {
-      x - 0.25f, y - 0.35f, 1, 0, 0, 1,
-      x + 0.25f, y - 0.35f, 0, 1, 0, 1,
-      x, y + 0.35f, 0, 0, 1, 1,
+      x - 0.22f, y - 0.26f, 1, 0, 0, 1,
+      x + 0.22f, y - 0.26f, 0, 1, 0, 1,
+      x, y + 0.26f, 0, 0, 1, 1,
    };
    return CreateMesh(vertices, 3);
 }
@@ -251,10 +292,10 @@ static Mesh CreatePoints(int panel)
    float x, y;
    PanelCenter(panel, x, y);
    const float vertices[] = {
-      x - 0.13f, y - 0.2f, 1, 1, 0, 1,
-      x + 0.13f, y - 0.2f, 0, 1, 1, 1,
-      x - 0.13f, y + 0.2f, 1, 0, 1, 1,
-      x + 0.13f, y + 0.2f, 1, 1, 1, 1,
+      x - 0.12f, y - 0.15f, 1, 1, 0, 1,
+      x + 0.12f, y - 0.15f, 0, 1, 1, 1,
+      x - 0.12f, y + 0.15f, 1, 0, 1, 1,
+      x + 0.12f, y + 0.15f, 1, 1, 1, 1,
    };
    return CreateMesh(vertices, 4);
 }
@@ -297,6 +338,10 @@ int main(int argc, char **argv)
       CompileShader("plain-expand-gs", GL_GEOMETRY_SHADER, kPlainExpandGeometrySource);
    GLuint full_expand_gs =
       CompileShader("full-expand-gs", GL_GEOMETRY_SHADER, kFullExpandGeometrySource);
+   GLuint tint_expand_gs =
+      CompileShader("tint-expand-gs", GL_GEOMETRY_SHADER, kTintExpandGeometrySource);
+   GLuint buffer_expand_gs =
+      CompileShader("buffer-expand-gs", GL_GEOMETRY_SHADER, kBufferExpandGeometrySource);
 
    Panel panels[] = {
       {"A", LinkProgram("A", plain_vs, 0, fs, false), CreateTriangle(0), GL_TRIANGLES, 0},
@@ -305,7 +350,15 @@ int main(int argc, char **argv)
       {"B3", LinkProgram("B3", tint_vs, pass_gs, gfs, true), CreateTriangle(3), GL_TRIANGLES, 240},
       {"C1", LinkProgram("C1", plain_vs, plain_expand_gs, gfs, true), CreatePoints(4), GL_POINTS, 300},
       {"C2", LinkProgram("C2", tint_vs, full_expand_gs, gfs, true), CreatePoints(5), GL_POINTS, 360},
+      {"C3", LinkProgram("C3", tint_vs, tint_expand_gs, gfs, true), CreatePoints(6), GL_POINTS, 420},
+      {"C4", LinkProgram("C4", plain_vs, buffer_expand_gs, gfs, true), CreatePoints(7), GL_POINTS, 480},
    };
+   /* The serialized-mode indicator: a small square in the last cell. */
+   const float indicator_vertices[] = {
+      0.80f, -0.80f, 1, 1, 1, 1,  0.92f, -0.80f, 1, 1, 1, 1,  0.80f, -0.92f, 1, 1, 1, 1,
+      0.92f, -0.80f, 1, 1, 1, 1,  0.92f, -0.92f, 1, 1, 1, 1,  0.80f, -0.92f, 1, 1, 1, 1,
+   };
+   const Mesh indicator = CreateMesh(indicator_vertices, 6);
    LogGLError("mesh setup");
 
    for (Panel &panel : panels) {
@@ -322,22 +375,27 @@ int main(int argc, char **argv)
    }
 
    GLuint sprite_ubo = 0;
-   if (GLuint program = panels[5].program) {
-      GLuint block = glGetUniformBlockIndex(program, "SpriteData");
+   const float half_size[4] = {0.05f, 0.08f, 0.0f, 0.0f};
+   glGenBuffers(1, &sprite_ubo);
+   glBindBuffer(GL_UNIFORM_BUFFER, sprite_ubo);
+   glBufferData(GL_UNIFORM_BUFFER, sizeof(half_size), half_size, GL_STATIC_DRAW);
+   glBindBufferBase(GL_UNIFORM_BUFFER, 2, sprite_ubo);
+   for (const Panel &panel : panels) {
+      if (!panel.program)
+         continue;
+      GLuint block = glGetUniformBlockIndex(panel.program, "SpriteData");
+      if (block == GL_INVALID_INDEX)
+         continue;
       GLint referenced = -1;
-      glGetActiveUniformBlockiv(program, block, GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER,
-                                &referenced);
-      Log("C2: SpriteData block index %u, referenced by GS %d", block, referenced);
-      glUniformBlockBinding(program, block, 2);
-      const float half_size[4] = {0.05f, 0.08f, 0.0f, 0.0f};
-      glGenBuffers(1, &sprite_ubo);
-      glBindBuffer(GL_UNIFORM_BUFFER, sprite_ubo);
-      glBufferData(GL_UNIFORM_BUFFER, sizeof(half_size), half_size, GL_STATIC_DRAW);
-      glBindBufferBase(GL_UNIFORM_BUFFER, 2, sprite_ubo);
+      glGetActiveUniformBlockiv(panel.program, block,
+                                GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER, &referenced);
+      Log("%s: SpriteData block index %u, referenced by GS %d", panel.name, block, referenced);
+      glUniformBlockBinding(panel.program, block, 2);
    }
    LogGLError("uniform setup");
-   Log("setup done: geometry panels start at frames 120, 180, 240, 300, 360");
+   Log("setup done: geometry panels start every 60 frames from frame 120");
 
+   bool serialized = false;
    uint32_t frame = 0;
    while (WHBProcIsRunning()) {
       /* Aroma's button combos (screenshots and the like) only see input the
@@ -345,7 +403,11 @@ int main(int argc, char **argv)
        */
       VPADStatus vpad;
       VPADReadError vpad_error;
-      VPADRead(VPAD_CHAN_0, &vpad, 1, &vpad_error);
+      if (VPADRead(VPAD_CHAN_0, &vpad, 1, &vpad_error) > 0 &&
+          vpad_error == VPAD_READ_SUCCESS && (vpad.trigger & VPAD_BUTTON_A)) {
+         serialized = !serialized;
+         Log("frame %u: serialized mode %s", frame, serialized ? "on" : "off");
+      }
 
       bool first_draw = false;
       glClearColor(0.12f, 0.12f, 0.16f, 1.0f);
@@ -360,6 +422,13 @@ int main(int argc, char **argv)
          glUseProgram(panel.program);
          glBindVertexArray(panel.mesh.vao);
          glDrawArrays(panel.primitive, 0, panel.mesh.count);
+         if (serialized)
+            glFinish();
+      }
+      if (serialized && panels[0].program) {
+         glUseProgram(panels[0].program);
+         glBindVertexArray(indicator.vao);
+         glDrawArrays(GL_TRIANGLES, 0, indicator.count);
       }
       glBindVertexArray(0);
       if (first_draw) {
