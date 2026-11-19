@@ -24,3 +24,4 @@ gx2gl_example(gx2gl_features_test gl-features-test "gx2gl feature test" "gx2gl f
 gx2gl_example(gx2gl_gs_demo gl-gs-demo "gx2gl GS demo" "GS demo")
 gx2gl_example(gx2gl_matrix_test gl-matrix-test "gx2gl matrix test" "gx2gl matrix")
 gx2gl_example(gx2gl_mip_test gl-mip-test "gx2gl mip test" "gx2gl mip")
+gx2gl_example(gx2gl_alpha_test gl-alpha-test "gx2gl alpha test" "gx2gl alpha")
