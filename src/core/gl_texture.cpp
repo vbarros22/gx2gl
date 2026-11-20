@@ -1807,6 +1807,12 @@ static void flush_texture_storage(GX2Texture *texture) {
   }
 }
 
+/* Set by glTexImage2D() while it rebuilds the storage of a level 0 it's
+ * about to fill completely: then the new storage is neither cleared nor
+ * flushed here, as the upload writes and flushes all of it. For a 1024x512
+ * lightmap that was a third of the upload time. */
+static bool g_storage_filled_by_caller;
+
 static bool rebuild_texture_storage_impl(GLTexture *tex, GLsizei width,
                                     GLsizei height, GLsizei depth,
                                     GLint internalformat,
@@ -1878,7 +1884,9 @@ static bool rebuild_texture_storage_impl(GLTexture *tex, GLsizei width,
     }
     log_texture_step("rebuild_texture_storage: image allocation ok ptr=%p",
                      new_texture.surface.image);
-    memset(new_texture.surface.image, 0, new_texture.surface.imageSize);
+    if (!(g_storage_filled_by_caller && mip_levels == 1)) {
+      memset(new_texture.surface.image, 0, new_texture.surface.imageSize);
+    }
     log_texture_step("rebuild_texture_storage: image cleared");
   }
 
@@ -1939,7 +1947,9 @@ static bool rebuild_texture_storage_impl(GLTexture *tex, GLsizei width,
     clear_texture_level_state(tex);
   }
 
-  flush_texture_storage(&tex->gx2_texture);
+  if (!(g_storage_filled_by_caller && mip_levels == 1)) {
+    flush_texture_storage(&tex->gx2_texture);
+  }
 
   log_texture_step("rebuild_texture_storage: before GX2InitTextureRegs");
   GX2InitTextureRegs(&tex->gx2_texture);
@@ -5527,8 +5537,15 @@ void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
       }
     } else {
       log_texture_step("_gl_TexImage2D: rebuilding level 0 storage");
-      if (!rebuild_texture_storage(tex, storage_width, storage_height,
-                                   storage_depth, internalformat, 1, false)) {
+      g_storage_filled_by_caller =
+          upload_pixels != NULL && bind_target != GL_TEXTURE_1D_ARRAY &&
+          storage_width == width && storage_height == height &&
+          storage_depth == 1;
+      bool rebuilt = rebuild_texture_storage(tex, storage_width, storage_height,
+                                             storage_depth, internalformat, 1,
+                                             false);
+      g_storage_filled_by_caller = false;
+      if (!rebuilt) {
         log_texture_step("_gl_TexImage2D: rebuild failed");
         _gl_set_error(GL_OUT_OF_MEMORY);
         return;
