@@ -1,4 +1,5 @@
 #include "gl_texture.h"
+#include "gl_stats.h"
 #include "gl_buffer.h"
 #include "gl_context.h"
 #include "gl_framebuffer.h"
@@ -1806,7 +1807,7 @@ static void flush_texture_storage(GX2Texture *texture) {
   }
 }
 
-static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
+static bool rebuild_texture_storage_impl(GLTexture *tex, GLsizei width,
                                     GLsizei height, GLsizei depth,
                                     GLint internalformat,
                                     uint32_t mip_levels,
@@ -1949,6 +1950,14 @@ static bool rebuild_texture_storage(GLTexture *tex, GLsizei width,
   }
   log_texture_step("rebuild_texture_storage: success");
   return true;
+}
+
+/* Timed for the frame statistics (GX2GL_GetFrameStats). */
+static bool rebuild_texture_storage(GLTexture *tex, GLsizei width, GLsizei height, GLsizei depth, GLint internalformat, uint32_t mip_levels, bool preserve_existing) {
+  gl_stats_time_t start = GL_STATS_NOW();
+  bool ok = rebuild_texture_storage_impl(tex, width, height, depth, internalformat, mip_levels, preserve_existing);
+  g_gl_frame_stats.texture_storage_us += GL_STATS_US(GL_STATS_NOW() - start);
+  return ok;
 }
 
 static bool multisample_format_is_integer(GX2SurfaceFormat format) {
@@ -4186,7 +4195,7 @@ static bool UploadRgtcRegion(GLTexture *Texture, GLint Level,
   return true;
 }
 
-static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
+static bool upload_texture_level_impl(GLTexture *tex, GLint level, GLsizei width,
                                  GLsizei height, GLsizei depth,
                                  const TextureFormatInfo *info,
                                  const GLvoid *pixels) {
@@ -4241,6 +4250,14 @@ static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width,
   DCFlushRange(dst, layout.image_size);
   GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, dst, layout.image_size);
   return true;
+}
+
+/* Timed for the frame statistics (GX2GL_GetFrameStats). */
+static bool upload_texture_level(GLTexture *tex, GLint level, GLsizei width, GLsizei height, GLsizei depth, const TextureFormatInfo *info, const GLvoid *pixels) {
+  gl_stats_time_t start = GL_STATS_NOW();
+  bool ok = upload_texture_level_impl(tex, level, width, height, depth, info, pixels);
+  g_gl_frame_stats.texture_copy_us += GL_STATS_US(GL_STATS_NOW() - start);
+  return ok;
 }
 
 static bool upload_texture_sub_region(GLTexture *tex, GLint level,

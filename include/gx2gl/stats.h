@@ -20,6 +20,8 @@ typedef struct GX2GL_FrameStats
     uint32_t uniform_calls, uniform_us;
     uint32_t texture_binds, texture_bind_us;
     uint32_t texture_uploads, texture_upload_us;
+    uint32_t texture_storage_us; /* of which (re)allocating texture storage */
+    uint32_t texture_copy_us;    /* of which converting and copying texels */
     uint32_t mipmap_generations, mipmap_us;
     uint32_t shader_compiles, program_links, shader_us;
     uint32_t program_switches, program_switch_us;
