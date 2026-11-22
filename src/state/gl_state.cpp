@@ -1322,6 +1322,18 @@ static void emit_viewport_state(void) {
 static void emit_scissor_state(void) {
   GLRect target = draw_target_rect();
   GLRect scissor = target;
+  GLRect viewport;
+
+  /* Nothing is drawn outside the viewport in GL; the GPU clips against a
+   * guard band and leaves the rest to the scissor, so a sprite or a line
+   * partly outside the viewport (Taisei's 4:3 view in a 16:9 window) was
+   * drawn over the letterbox. glClear() isn't affected: it doesn't go
+   * through this scissor. */
+  viewport.x = (GLint)g_gl_context->viewport.x;
+  viewport.y = (GLint)g_gl_context->viewport.y;
+  viewport.width = (GLint)g_gl_context->viewport.width;
+  viewport.height = (GLint)g_gl_context->viewport.height;
+  scissor = intersect_rect(scissor, viewport);
 
   if (g_gl_context->scissor_test_enabled) {
     GLRect requested;
@@ -1329,7 +1341,7 @@ static void emit_scissor_state(void) {
     requested.y = g_gl_context->scissor.y;
     requested.width = g_gl_context->scissor.width;
     requested.height = g_gl_context->scissor.height;
-    scissor = intersect_rect(target, requested);
+    scissor = intersect_rect(scissor, requested);
   }
 
   GX2SetScissor((uint32_t)scissor.x,
@@ -1435,7 +1447,7 @@ void gl_flush_state(void) {
   if (dirty & (GL_DIRTY_VIEWPORT | GL_DIRTY_FRAMEBUFFER)) {
     emit_viewport_state();
   }
-  if (dirty & (GL_DIRTY_SCISSOR | GL_DIRTY_FRAMEBUFFER)) {
+  if (dirty & (GL_DIRTY_SCISSOR | GL_DIRTY_VIEWPORT | GL_DIRTY_FRAMEBUFFER)) {
     emit_scissor_state();
   }
   if (dirty & (GL_DIRTY_BLEND | GL_DIRTY_LOGIC_OP)) {
