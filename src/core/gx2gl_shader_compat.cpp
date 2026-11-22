@@ -554,6 +554,72 @@ static int assign_binding(bool used_bindings[], int max_bindings, bool uniform_b
   return -1;
 }
 
+/* Which lines can hold a declaration: not the ones entirely inside a
+ * comment (license text like "in all copies ... of the Software." parsed
+ * as an input named Software) or inside parentheses opened on an earlier
+ * line (function parameters such as "in vec3 pos," on lines of their own,
+ * parsed as global inputs and given layout locations). */
+static std::vector<bool> lines_with_declaration_text(const char *source) {
+  std::vector<bool> lines;
+  bool block_comment = false;
+  int paren_depth = 0;
+  bool has_text = false;
+  bool line_comment = false;
+  bool preprocessor = false;
+  bool line_start = true;
+
+  if (!source) return lines;
+  for (const char *p = source;; ++p) {
+    char c = *p;
+    if (c == '\n' || c == '\0') {
+      lines.push_back(has_text || preprocessor);
+      if (c == '\0') break;
+      has_text = false;
+      line_comment = false;
+      preprocessor = false;
+      line_start = true;
+      continue;
+    }
+    if (block_comment) {
+      if (c == '*' && p[1] == '/') {
+        block_comment = false;
+        ++p;
+      }
+      continue;
+    }
+    if (line_comment) continue;
+    if (c == '/' && p[1] == '*') {
+      block_comment = true;
+      ++p;
+      continue;
+    }
+    if (c == '/' && p[1] == '/') {
+      line_comment = true;
+      continue;
+    }
+    if (c == ' ' || c == '\t' || c == '\r') continue;
+    if (line_start && c == '#') preprocessor = true;
+    line_start = false;
+    if (preprocessor) continue;
+    if (c == '(') {
+      if (paren_depth == 0) has_text = true;
+      ++paren_depth;
+      continue;
+    }
+    if (c == ')') {
+      if (paren_depth > 0) --paren_depth;
+      continue;
+    }
+    if (paren_depth == 0) has_text = true;
+  }
+  return lines;
+}
+
+static bool line_has_declaration_text(const std::vector<bool> &lines,
+                                      uint32_t line_index) {
+  return line_index >= lines.size() || lines[line_index];
+}
+
 static bool scan_explicit_shader_layouts(const char *source,
                                          bool used_input_locations[],
                                          bool used_output_locations[],
@@ -563,6 +629,8 @@ static bool scan_explicit_shader_layouts(const char *source,
 
   if (!source) return false;
   line_start = source;
+  const std::vector<bool> declaration_lines = lines_with_declaration_text(source);
+  uint32_t line_index = 0;
 
   while (*line_start) {
     const char *line_end = strchr(line_start, '\n');
@@ -573,7 +641,8 @@ static bool scan_explicit_shader_layouts(const char *source,
     UniformDecl uniform_decl;
     InterfaceDecl interface_decl;
 
-    if (first < line.size() && line[first] != '#') {
+    if (first < line.size() && line[first] != '#' &&
+        line_has_declaration_text(declaration_lines, line_index)) {
       if (parse_uniform_declaration(line, &uniform_decl)) {
         if ((uniform_decl.is_block || is_sampler_type(uniform_decl.type)) &&
             uniform_decl.layout.has_binding &&
@@ -601,6 +670,7 @@ static bool scan_explicit_shader_layouts(const char *source,
       break;
     }
     line_start = line_end + 1;
+    ++line_index;
   }
 
   return true;
@@ -742,11 +812,16 @@ static bool collect_interface_declarations(
     return false;
   }
 
+  const std::vector<bool> declaration_lines = lines_with_declaration_text(source);
+
   while (*line_start) {
     const char *line_end = strchr(line_start, '\n');
     size_t line_length = line_end ? (size_t)(line_end - line_start)
                                   : strlen(line_start);
     std::string SourceLine = strip_line_comment(std::string(line_start, line_length));
+    if (!line_has_declaration_text(declaration_lines, line_number - 1u)) {
+      SourceLine.clear();
+    }
     for (const std::string &line : SplitShaderStatements(SourceLine)) {
       size_t first = skip_whitespace(line, 0);
       InterfaceDecl decl;
@@ -1392,6 +1467,13 @@ static char *lower_source_for_cafeglsl(const char *source,
                                        char *info_log_out,
                                        int info_log_max_length) {
   std::string lowered_source(source);
+  /* GLSL allows blank lines before #version (Taisei's shaders have one);
+   * CafeGLSL's preprocessor wants it on the first line. */
+  size_t FirstText = lowered_source.find_first_not_of(" \t\r\n");
+  if (FirstText != std::string::npos && FirstText > 0 &&
+      lowered_source.compare(FirstText, 8, "#version") == 0) {
+    lowered_source.erase(0, FirstText);
+  }
   size_t Precision = lowered_source.find("precision mediump float;");
   if (Precision != std::string::npos) {
     lowered_source.erase(Precision, strlen("precision mediump float;"));
@@ -1416,7 +1498,13 @@ static char *lower_source_for_cafeglsl(const char *source,
     return NULL;
   }
 
+  const std::vector<bool> declaration_lines =
+      lines_with_declaration_text(lowered_source.c_str());
+  uint32_t line_index = 0;
+
   while (line_start < lowered_source.size()) {
+    bool declaration_line =
+        line_has_declaration_text(declaration_lines, line_index++);
     size_t line_end = lowered_source.find('\n', line_start);
     bool has_newline = line_end != std::string::npos;
     size_t line_length = has_newline ? line_end - line_start
@@ -1428,7 +1516,8 @@ static char *lower_source_for_cafeglsl(const char *source,
       size_t first = skip_whitespace(parse_line, 0);
       std::string output_part = Part;
 
-      if (first < parse_line.size() && parse_line[first] != '#') {
+      if (first < parse_line.size() && parse_line[first] != '#' &&
+          declaration_line) {
         UniformDecl uniform_decl;
         InterfaceDecl interface_decl;
 
