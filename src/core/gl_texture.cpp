@@ -5447,6 +5447,57 @@ static bool valid_depth_texture_source(GLint internalformat, GLenum format,
   }
 }
 
+/* GL_ARB_texture_storage: all the levels in one allocation. Defining them
+ * one glTexImage2D() at a time reallocates and copies the whole texture
+ * for every level, which for a 4096x4096 atlas needs two copies at once
+ * (GL_OUT_OF_MEMORY in a fragmented heap) and takes seconds. */
+void _gl_TexStorage2D(GLenum target, GLsizei levels, GLenum internalformat,
+                      GLsizei width, GLsizei height) {
+  GLTexture *tex;
+  GLsizei max_dim;
+  GLsizei max_levels = 1;
+
+  if (!g_gl_context) {
+    return;
+  }
+  if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) {
+    _gl_set_error(GL_INVALID_ENUM);
+    return;
+  }
+  tex = get_bound_texture(target);
+  if (!tex) {
+    _gl_set_error(GL_INVALID_OPERATION);
+    return;
+  }
+  max_dim = width > height ? width : height;
+  while (max_dim > 1) {
+    max_dim >>= 1;
+    ++max_levels;
+  }
+  if (levels < 1 || width < 1 || height < 1 || width > 8192 || height > 8192 ||
+      levels > max_levels || levels > GX2GL_MAX_TEXTURE_LEVELS ||
+      (target == GL_TEXTURE_CUBE_MAP && width != height)) {
+    _gl_set_error(GL_INVALID_VALUE);
+    return;
+  }
+  if (!rebuild_texture_storage(tex, width, height,
+                               target == GL_TEXTURE_CUBE_MAP ? 6 : 1,
+                               (GLint)internalformat, (uint32_t)levels,
+                               false)) {
+    _gl_set_error(GL_OUT_OF_MEMORY);
+    return;
+  }
+  for (uint32_t level = 0; level < (uint32_t)levels; ++level) {
+    if (target == GL_TEXTURE_CUBE_MAP) {
+      for (uint32_t face = 0; face < 6u; ++face) {
+        mark_texture_level_defined(tex, level, face);
+      }
+    } else {
+      mark_texture_level_defined(tex, level, 0);
+    }
+  }
+}
+
 void _gl_TexImage2D(GLenum target, GLint level, GLint internalformat,
                     GLsizei width, GLsizei height, GLint border, GLenum format,
                     GLenum type, const GLvoid *pixels) {

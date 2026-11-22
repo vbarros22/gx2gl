@@ -46,6 +46,7 @@ void gl_dispatch_init(gl_context_t *ctx) {
   ctx->dispatch.glBindSampler = _gl_BindSampler;
   ctx->dispatch.glActiveTexture = _gl_ActiveTexture;
   ctx->dispatch.glTexImage2D = _gl_TexImage2D;
+  ctx->dispatch.glTexStorage2D = _gl_TexStorage2D;
   ctx->dispatch.glTexImage3D = _gl_TexImage3D;
   ctx->dispatch.glTexSubImage2D = _gl_TexSubImage2D;
   ctx->dispatch.glTexSubImage3D = _gl_TexSubImage3D;

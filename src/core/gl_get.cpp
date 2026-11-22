@@ -235,6 +235,7 @@ static const char *const g_extensions[] = {
     "GL_ARB_uniform_buffer_object",
     "GL_ARB_instanced_arrays",
     "GL_EXT_texture_compression_s3tc",
+    "GL_ARB_texture_storage",
 };
 
 static const uint32_t g_extension_count =
