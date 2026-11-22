@@ -1509,6 +1509,33 @@ static bool shader_var_type_to_reflection(GX2ShaderVarType type, GLenum *base_ty
   }
 }
 
+/* A matCxR vertex attribute takes C consecutive locations, one column
+ * (a vecR) each. */
+static bool matrix_attrib_columns(GX2ShaderVarType type, uint32_t *columns,
+                                  uint32_t *rows) {
+  switch (type) {
+  case GX2_SHADER_VAR_TYPE_FLOAT2X2: *columns = 2; *rows = 2; return true;
+  case GX2_SHADER_VAR_TYPE_FLOAT2X3: *columns = 2; *rows = 3; return true;
+  case GX2_SHADER_VAR_TYPE_FLOAT2X4: *columns = 2; *rows = 4; return true;
+  case GX2_SHADER_VAR_TYPE_FLOAT3X2: *columns = 3; *rows = 2; return true;
+  case GX2_SHADER_VAR_TYPE_FLOAT3X3: *columns = 3; *rows = 3; return true;
+  case GX2_SHADER_VAR_TYPE_FLOAT3X4: *columns = 3; *rows = 4; return true;
+  case GX2_SHADER_VAR_TYPE_FLOAT4X2: *columns = 4; *rows = 2; return true;
+  case GX2_SHADER_VAR_TYPE_FLOAT4X3: *columns = 4; *rows = 3; return true;
+  case GX2_SHADER_VAR_TYPE_FLOAT4X4: *columns = 4; *rows = 4; return true;
+  default: return false;
+  }
+}
+
+static bool attrib_locations_free(const GLProgram *prog, uint32_t location,
+                                  uint32_t count) {
+  if (location + count > GL33_MAX_VERTEX_ATTRIBS) return false;
+  for (uint32_t c = 0; c < count; ++c) {
+    if (prog->attrib_reflection[location + c].active) return false;
+  }
+  return true;
+}
+
 static bool build_program_attrib_reflection(GLProgram *prog, GX2VertexShader *vertex_shader) {
   if (!prog) return false;
 
@@ -1538,8 +1565,14 @@ static bool build_program_attrib_reflection(GLProgram *prog, GX2VertexShader *ve
 
       GLenum BaseType;
       uint32_t Components;
-      if (!shader_var_type_to_reflection(Attrib->type, &BaseType, &Components))
-        continue;
+      uint32_t Columns = 1;
+      if (!shader_var_type_to_reflection(Attrib->type, &BaseType, &Components)) {
+        /* Matrices were skipped altogether, so e.g. a per-instance mat4
+         * transform never reached the shader. */
+        if (!matrix_attrib_columns(Attrib->type, &Columns, &Components))
+          continue;
+        BaseType = GL_FLOAT;
+      }
 
       GLint ExplicitLocation = ExplicitLocations[i];
       GLint RequestedLocation = -1;
@@ -1562,21 +1595,25 @@ static bool build_program_attrib_reflection(GLProgram *prog, GX2VertexShader *ve
       } else {
         if (ExplicitLocation >= 0 || RequestedLocation >= 0) continue;
         Location = Attrib->location;
-        if (prog->attrib_reflection[Location].active) {
+        if (!attrib_locations_free(prog, Location, Columns)) {
           Location = 0;
           while (Location < GL33_MAX_VERTEX_ATTRIBS &&
-                 prog->attrib_reflection[Location].active) ++Location;
+                 !attrib_locations_free(prog, Location, Columns)) ++Location;
         }
       }
 
       if (Location >= GL33_MAX_VERTEX_ATTRIBS ||
-          prog->attrib_reflection[Location].active) return false;
-      ProgramAttribReflection *Reflection = &prog->attrib_reflection[Location];
-      Reflection->active = true;
-      Reflection->base_type = BaseType;
-      Reflection->component_count = Components;
-      Reflection->GX2Location = Attrib->location;
-      replace_owned_string(&Reflection->name, Attrib->name);
+          !attrib_locations_free(prog, Location, Columns)) return false;
+      for (uint32_t Column = 0; Column < Columns; ++Column) {
+        ProgramAttribReflection *Reflection =
+            &prog->attrib_reflection[Location + Column];
+        Reflection->active = true;
+        Reflection->base_type = BaseType;
+        Reflection->component_count = Components;
+        Reflection->GX2Location = Attrib->location + Column;
+        /* Only the first column answers glGetAttribLocation(). */
+        if (Column == 0) replace_owned_string(&Reflection->name, Attrib->name);
+      }
       Assigned[i] = true;
     }
   }
