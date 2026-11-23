@@ -3530,6 +3530,33 @@ static bool blit_sample_rules_match(const GX2Surface *source,
     return true;
 }
 
+/* Depth blits between two framebuffers whose depth textures have tiled
+ * depth targets (setup_texture_depth_target()), over the whole of both:
+ * a GPU surface copy instead of staging both through the CPU, which took
+ * about a second for a 864x1008 depth buffer. */
+static bool blit_depth_targets_on_gpu(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                                      GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1) {
+    GLuint read_id = g_gl_context->bound_read_framebuffer;
+    GLuint draw_id = g_gl_context->bound_framebuffer;
+    if (read_id == 0 || draw_id == 0 || read_id >= MAX_FRAMEBUFFERS ||
+        draw_id >= MAX_FRAMEBUFFERS || read_id == draw_id) return false;
+    GLFramebuffer *src = &g_framebuffers[read_id];
+    GLFramebuffer *dst = &g_framebuffers[draw_id];
+    if (!src->in_use || !dst->in_use || !src->depth_target_allocated ||
+        !dst->depth_target_allocated) return false;
+    const GX2Surface *a = &src->depth_target;
+    GX2Surface *b = &dst->depth_target;
+    if (a->width != b->width || a->height != b->height || a->format != b->format)
+        return false;
+    if (srcX0 != 0 || srcY0 != 0 || dstX0 != 0 || dstY0 != 0 ||
+        srcX1 != (GLint)a->width || dstX1 != (GLint)a->width ||
+        srcY1 != (GLint)a->height || dstY1 != (GLint)a->height) return false;
+    GX2CopySurface(a, 0, 0, b, 0, 0);
+    restore_context_after_surface_op();
+    dst->depth_needs_resolve = true;
+    return true;
+}
+
 void _gl_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
                          GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
                          GLbitfield mask, GLenum filter) {
@@ -3636,6 +3663,12 @@ void _gl_BlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
 
     if (srcX0 == srcX1 || srcY0 == srcY1 ||
         dstX0 == dstX1 || dstY0 == dstY1 || mask == 0) return;
+
+    if (copy_depth && !copy_stencil &&
+        blit_depth_targets_on_gpu(srcX0, srcY0, srcX1, srcY1,
+                                  dstX0, dstY0, dstX1, dstY1)) {
+        copy_depth = false;
+    }
 
     g_blit_flip_source = g_gl_context->bound_read_framebuffer == 0;
     g_blit_flip_destination = g_gl_context->bound_framebuffer == 0;
