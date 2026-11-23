@@ -280,21 +280,38 @@ static GX2RResourceFlags build_framebuffer_surface_flags(GLint internal_format,
     return flags;
 }
 
+static void destroy_gx2r_surface_now(void *arg) {
+    GX2Surface *surface = (GX2Surface *)arg;
+    GX2RDestroySurfaceEx(surface, GX2R_RESOURCE_BIND_NONE);
+    free(surface);
+}
+
+/*
+ * Render targets may still be in use by draws the GPU has not run yet, so
+ * their memory is released once the GPU is done with the frame.
+ */
 static void free_surface_storage(GX2Surface *surface) {
     if (!surface) return;
     if (surface->resourceFlags) {
-        GX2RDestroySurfaceEx(surface, GX2R_RESOURCE_BIND_NONE);
+        GX2Surface *copy = (GX2Surface *)malloc(sizeof(*copy));
+        if (copy) {
+            *copy = *surface;
+            gl_mem_defer(destroy_gx2r_surface_now, copy);
+        } else {
+            GX2DrawDone();
+            GX2RDestroySurfaceEx(surface, GX2R_RESOURCE_BIND_NONE);
+        }
         memset(surface, 0, sizeof(*surface));
         return;
     }
-    if (surface->image) gl_mem_free(GL_MEM_TYPE_MEM2, surface->image);
-    if (surface->mipmaps) gl_mem_free(GL_MEM_TYPE_MEM2, surface->mipmaps);
+    if (surface->image) gl_mem_free_deferred(GL_MEM_TYPE_MEM2, surface->image);
+    if (surface->mipmaps) gl_mem_free_deferred(GL_MEM_TYPE_MEM2, surface->mipmaps);
     memset(surface, 0, sizeof(*surface));
 }
 
 static void free_color_buffer_aux(GX2ColorBuffer *color_buffer) {
     if (!color_buffer) return;
-    if (color_buffer->aaBuffer) gl_mem_free(GL_MEM_TYPE_MEM2, color_buffer->aaBuffer);
+    if (color_buffer->aaBuffer) gl_mem_free_deferred(GL_MEM_TYPE_MEM2, color_buffer->aaBuffer);
     color_buffer->aaBuffer = NULL;
     color_buffer->aaSize = 0;
 }
@@ -512,6 +529,41 @@ static bool ensure_texture_color_target(GLFramebuffer *fb, uint32_t index, const
     }
 
     target->allocated = true;
+    return true;
+}
+
+/*
+ * Renders a texture colour attachment into a tiled surface instead of the
+ * texture's own linear storage: the GPU renders linear surfaces several
+ * times slower. resolve_framebuffer_texture_targets() copies it back into
+ * the texture before the texture is sampled. Only plain 2D level-0, 1X
+ * attachments; the rest keep rendering into the texture.
+ */
+static bool setup_texture_color_target(GLFramebuffer *fb, uint32_t index,
+                                       GX2Texture *texture) {
+    const GLAttachmentRef *attachment = &fb->color_attachments[index];
+    GLTextureColorTarget *target = &fb->texture_targets[index];
+
+    if (!texture || !texture->surface.image) return false;
+    if (texture->surface.dim != GX2_SURFACE_DIM_TEXTURE_2D ||
+        texture->surface.aa != GX2_AA_MODE1X || attachment->level != 0 ||
+        attachment_view_slice(attachment) != 0) {
+        return false;
+    }
+    if (fb->color_buffer_owns_aux[index]) free_color_buffer_aux(&fb->cb[index]);
+    fb->color_buffer_owns_aux[index] = false;
+    fb->color_needs_resolve[index] = false;
+    if (!ensure_texture_color_target(fb, index, texture)) {
+        free_framebuffer_texture_target(fb, index);
+        return false;
+    }
+
+    /* Start from what the texture holds: draws may load it. */
+    GX2CopySurface(&texture->surface, 0, 0, &target->surface, 0, 0);
+    restore_context_after_surface_op();
+
+    fb->cb[index] = target->color_buffer;
+    fb->color_buffer_owns_aux[index] = false;
     return true;
 }
 
@@ -1272,6 +1324,7 @@ static GX2ColorBuffer *get_read_color_buffer(void) {
     } else {
         GLFramebuffer *fb = &g_framebuffers[fbo];
         if (fb->dirty) {
+            resolve_framebuffer_texture_targets(fb);
             for (uint32_t i = 0; i < 8; ++i) {
                 if (!attachment_ref_present(&fb->color_attachments[i])) {
                     free_framebuffer_texture_target(fb, i);
@@ -1279,8 +1332,10 @@ static GX2ColorBuffer *get_read_color_buffer(void) {
                 }
                 if (fb->color_attachments[i].kind == GL_ATTACHMENT_KIND_TEXTURE) {
                     GX2Texture *t = gl_get_gx2_texture(fb->color_attachments[i].object);
-                    free_framebuffer_texture_target(fb, i);
-                    if (t && init_color_buffer_from_surface_view(
+                    if (setup_texture_color_target(fb, i, t)) {
+                        /* rendering into the tiled target */
+                    } else if (free_framebuffer_texture_target(fb, i), false) {
+                    } else if (t && init_color_buffer_from_surface_view(
                                  &fb->cb[i], &t->surface,
                                  fb->color_attachments[i].level,
                                  attachment_view_slice(&fb->color_attachments[i]),
@@ -1666,6 +1721,9 @@ void _gl_FramebufferTextureLayer(GLenum target, GLenum attachment, GLuint textur
             _gl_set_error(GL_INVALID_ENUM);
             return;
         }
+        /* Draws still in a tiled target belong to the old texture. */
+        if (attachment >= GL_COLOR_ATTACHMENT0 && attachment <= GL_COLOR_ATTACHMENT7)
+            resolve_framebuffer_texture_targets(fb);
         if (texture == 0) clear_attachment_ref(ref);
         else set_texture_attachment_ref(ref, texture, texture_target, level,
                                         layer, GL_FALSE);
@@ -4118,6 +4176,7 @@ void gl_bind_framebuffers(void) {
     }
     GLFramebuffer *fb = &g_framebuffers[fbo];
     if (fb->dirty) {
+        resolve_framebuffer_texture_targets(fb);
         for (uint32_t i = 0; i < 8; ++i) {
             if (!attachment_ref_present(&fb->color_attachments[i])) {
                 free_framebuffer_texture_target(fb, i);
@@ -4125,8 +4184,10 @@ void gl_bind_framebuffers(void) {
             }
             if (fb->color_attachments[i].kind == GL_ATTACHMENT_KIND_TEXTURE) {
                 GX2Texture *t = gl_get_gx2_texture(fb->color_attachments[i].object);
-                free_framebuffer_texture_target(fb, i);
-                if (t && init_color_buffer_from_surface_view(
+                if (setup_texture_color_target(fb, i, t)) {
+                    /* rendering into the tiled target */
+                } else if (free_framebuffer_texture_target(fb, i), false) {
+                } else if (t && init_color_buffer_from_surface_view(
                              &fb->cb[i], &t->surface,
                              fb->color_attachments[i].level,
                              attachment_view_slice(&fb->color_attachments[i]),
