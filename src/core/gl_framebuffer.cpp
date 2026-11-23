@@ -790,7 +790,9 @@ static GLRenderbuffer *get_renderbuffer(GLuint id) {
 
 static bool is_depth_internal_format(GLint internal_format) {
     switch (internal_format) {
-    case GL_DEPTH_COMPONENT: case GL_DEPTH_COMPONENT32F: case GL_DEPTH_STENCIL: case GL_DEPTH24_STENCIL8: return true;
+    case GL_DEPTH_COMPONENT: case GL_DEPTH_COMPONENT16: case GL_DEPTH_COMPONENT24:
+    case GL_DEPTH_COMPONENT32: case GL_DEPTH_COMPONENT32F:
+    case GL_DEPTH_STENCIL: case GL_DEPTH24_STENCIL8: case GL_DEPTH32F_STENCIL8: return true;
     default: return false;
     }
 }
@@ -839,7 +841,12 @@ static GLint renderbuffer_component_bits(GLint internal_format, GLenum component
                 component == GL_RENDERBUFFER_GREEN_SIZE ||
                 component == GL_RENDERBUFFER_BLUE_SIZE ||
                 component == GL_RENDERBUFFER_ALPHA_SIZE) ? 32 : 0;
+    case GL_DEPTH_COMPONENT16:
+        return component == GL_RENDERBUFFER_DEPTH_SIZE ? 16 : 0;
+    case GL_DEPTH_COMPONENT24:
+        return component == GL_RENDERBUFFER_DEPTH_SIZE ? 24 : 0;
     case GL_DEPTH_COMPONENT:
+    case GL_DEPTH_COMPONENT32:
     case GL_DEPTH_COMPONENT32F:
         return component == GL_RENDERBUFFER_DEPTH_SIZE ? 32 : 0;
     case GL_DEPTH_STENCIL:
@@ -950,7 +957,8 @@ static bool get_renderbuffer_format_info(GLenum internalformat, GX2SurfaceFormat
         *gx2_format = GX2_SURFACE_FORMAT_FLOAT_R32_G32_B32_A32;
         *surface_use = (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_COLOR_BUFFER);
         *is_depth = false; return true;
-    case GL_DEPTH_COMPONENT: case GL_DEPTH_COMPONENT32F:
+    case GL_DEPTH_COMPONENT: case GL_DEPTH_COMPONENT16: case GL_DEPTH_COMPONENT24:
+    case GL_DEPTH_COMPONENT32: case GL_DEPTH_COMPONENT32F:
         *gx2_format = GX2_SURFACE_FORMAT_FLOAT_R32;
         *surface_use = (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_DEPTH_BUFFER);
         *is_depth = true; return true;
