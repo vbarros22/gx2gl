@@ -29,6 +29,7 @@ void GX2ConvertDepthBufferToTextureSurface(GX2DepthBuffer *src, GX2Surface *dst,
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include "gl_stats.h" /* times GX2DrawDone() */
 
 #ifndef GL_TEXTURE_CUBE_MAP_POSITIVE_X
 #define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515

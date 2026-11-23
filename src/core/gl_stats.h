@@ -31,7 +31,32 @@ void gl_stats_set_vsync(uint32_t vsync_us);
         gl_stats_time_t gl_stats_start_ = GL_STATS_NOW();                   \
         stmt;                                                               \
         g_gl_frame_stats.count++;                                           \
-        g_gl_frame_stats.us += GL_STATS_US(GL_STATS_NOW() - gl_stats_start_); \
+        uint32_t gl_stats_us_ = GL_STATS_US(GL_STATS_NOW() - gl_stats_start_); \
+        g_gl_frame_stats.us += gl_stats_us_;                                \
+        if (gl_stats_us_ > g_gl_frame_stats.slowest_us) {                   \
+            g_gl_frame_stats.slowest_us = gl_stats_us_;                     \
+            g_gl_frame_stats.slowest_call = #stmt;                          \
+        }                                                                   \
     } while (0)
+
+#ifdef __WIIU__
+#include <gx2/event.h>
+/* GX2DrawDone(), timed into g_gl_frame_stats; the macro below routes the
+ * calls of every file that includes this header after the GX2 ones. */
+static inline void gl_stats_draw_done(const char *file, int line)
+{
+    gl_stats_time_t start = GL_STATS_NOW();
+    (GX2DrawDone)();
+    uint32_t us = GL_STATS_US(GL_STATS_NOW() - start);
+    g_gl_frame_stats.gpu_waits++;
+    g_gl_frame_stats.gpu_wait_us += us;
+    if (us > g_gl_frame_stats.slowest_wait_us) {
+        g_gl_frame_stats.slowest_wait_us = us;
+        g_gl_frame_stats.slowest_wait_file = file;
+        g_gl_frame_stats.slowest_wait_line = line;
+    }
+}
+#define GX2DrawDone() gl_stats_draw_done(__FILE__, __LINE__)
+#endif
 
 #endif

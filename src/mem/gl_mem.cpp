@@ -12,6 +12,7 @@
 #include <gx2/draw.h>
 #include <gx2/event.h>
 #include <gx2/mem.h>
+#include "core/gl_stats.h" /* times GX2DrawDone() */
 
 #ifndef GX2GL_ENABLE_VERBOSE_FILE_LOGS
 #define GX2GL_ENABLE_VERBOSE_FILE_LOGS 0

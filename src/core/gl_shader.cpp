@@ -30,6 +30,7 @@ extern "C" {
 #include <string.h>
 #include <whb/gfx.h>
 #include <stdlib.h>
+#include "gl_stats.h" /* times GX2DrawDone() */
 
 #define MAX_PROGRAMS 512
 #define MAX_SHADERS 512

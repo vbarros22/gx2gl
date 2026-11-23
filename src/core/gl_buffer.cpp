@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "gl_stats.h" /* times GX2DrawDone() */
 
 #ifdef __cplusplus
 extern "C" {

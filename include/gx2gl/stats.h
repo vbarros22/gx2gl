@@ -29,6 +29,14 @@ typedef struct GX2GL_FrameStats
     uint32_t other_calls, other_us; /* every other GL call */
     uint32_t finish_us;
     uint32_t vsync_us; /* GX2GL_Present() waiting for the previous frame to be shown */
+    /* The single slowest GL call of the frame, by its dispatch statement. */
+    uint32_t slowest_us;
+    const char *slowest_call;
+    /* GX2DrawDone() inside gx2gl: total wait, and the longest one's place. */
+    uint32_t gpu_waits, gpu_wait_us;
+    uint32_t slowest_wait_us;
+    const char *slowest_wait_file;
+    int slowest_wait_line;
 } GX2GL_FrameStats;
 
 /* The counts of the last frame GX2GL_Present() finished. */
