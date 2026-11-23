@@ -5,6 +5,7 @@
 
 #include <gx2r/buffer.h>
 #include <gx2/draw.h>
+#include <gx2/mem.h>
 #include <gx2/event.h>
 
 #include <stdint.h>
@@ -128,11 +129,30 @@ static bool ranges_overlap(GLintptr a_offset, GLsizeiptr a_size,
   return a0 < b1 && b0 < a1;
 }
 
+/* Retired buffers the GPU is done with, kept for create_gx2r_buffer(). */
+#define BUFFER_POOL_MAX 64u
+#define BUFFER_POOL_MAX_BYTES (16u * 1024u * 1024u)
+static GX2RBuffer g_buffer_pool[BUFFER_POOL_MAX];
+static uint32_t g_buffer_pool_count;
+static uint32_t g_buffer_pool_bytes;
+
 static bool create_gx2r_buffer(GX2RBuffer *gx2, GLsizeiptr size,
                                GX2RResourceFlags flags) {
   if (!gx2 || size < 0 || (uint64_t)size > UINT32_MAX) return false;
   memset(gx2, 0, sizeof(*gx2));
   if (size == 0) return true;
+
+  /* Streaming orphans a buffer of the same size again and again. */
+  for (uint32_t i = 0; i < g_buffer_pool_count; ++i) {
+    /* GX2R adds its own state bits above the caller's flags. */
+    if (((g_buffer_pool[i].flags ^ flags) & 0x3FFFFFu) != 0 ||
+        g_buffer_pool[i].elemCount != (uint32_t)size)
+      continue;
+    *gx2 = g_buffer_pool[i];
+    g_buffer_pool[i] = g_buffer_pool[--g_buffer_pool_count];
+    g_buffer_pool_bytes -= (uint32_t)size;
+    return true;
+  }
 
   gx2->flags = flags;
   gx2->elemSize = 1;
@@ -146,7 +166,14 @@ static bool create_gx2r_buffer(GX2RBuffer *gx2, GLsizeiptr size,
 
 static void destroy_retired_gx2r_buffer(void *arg) {
   GX2RBuffer *gx2 = (GX2RBuffer *)arg;
-  GX2RDestroyBufferEx(gx2, (GX2RResourceFlags)0);
+  uint32_t size = gx2->elemSize * gx2->elemCount;
+  if (g_buffer_pool_count < BUFFER_POOL_MAX &&
+      size <= BUFFER_POOL_MAX_BYTES - g_buffer_pool_bytes) {
+    g_buffer_pool[g_buffer_pool_count++] = *gx2;
+    g_buffer_pool_bytes += size;
+  } else {
+    GX2RDestroyBufferEx(gx2, (GX2RResourceFlags)0);
+  }
   free(gx2);
 }
 
@@ -277,14 +304,12 @@ static bool sync_raw_range(GLBuffer *buf, GLintptr offset, GLsizeiptr size) {
   if (!buf->raw_owned || !buf->raw_buffer.buffer || !buf->shadow) return false;
   if (!range_in_buffer(offset, size, buf->size)) return false;
 
-  dst = (uint8_t *)GX2RLockBufferEx(&buf->raw_buffer, GX2R_RESOURCE_USAGE_CPU_WRITE);
-  if (!dst) return false;
-
+  /* Flush only the bytes written: locking and invalidating the GX2R
+   * buffer flushes all of it, which for a big streaming buffer updated
+   * a little at a time cost more than the copy. */
+  dst = (uint8_t *)buf->raw_buffer.buffer;
   memcpy(dst + offset, buf->shadow + offset, (size_t)size);
-  GX2RUnlockBufferEx(&buf->raw_buffer, GX2R_RESOURCE_USAGE_CPU_WRITE);
-  GX2RInvalidateBuffer(&buf->raw_buffer,
-                       (GX2RResourceFlags)(GX2R_RESOURCE_USAGE_CPU_WRITE |
-                                           GX2R_RESOURCE_USAGE_GPU_READ));
+  GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, dst + offset, (uint32_t)size);
   return true;
 }
 
@@ -611,19 +636,23 @@ void _gl_BufferData(GLenum target, GLsizeiptr size, const GLvoid *data,
 
   memset(&new_raw, 0, sizeof(new_raw));
   if (size > 0) {
-    new_shadow = (uint8_t *)malloc((size_t)size);
+    /* The CPU copy is never read by the GPU, so a buffer orphaned at the
+     * same size keeps it. */
+    bool reuse_shadow = buf->shadow && buf->size == size && !buf->mapped_ptr;
+    new_shadow = reuse_shadow ? buf->shadow : (uint8_t *)malloc((size_t)size);
     if (!new_shadow) {
       _gl_set_error(GL_OUT_OF_MEMORY);
       return;
     }
-    if (data) memcpy(new_shadow, data, (size_t)size);
-    else memset(new_shadow, 0, (size_t)size);
 
     if (!create_gx2r_buffer(&new_raw, size, kRawBufferFlags)) {
-      free(new_shadow);
+      if (!reuse_shadow) free(new_shadow);
       _gl_set_error(GL_OUT_OF_MEMORY);
       return;
     }
+    if (reuse_shadow) buf->shadow = NULL;
+    if (data) memcpy(new_shadow, data, (size_t)size);
+    else if (!reuse_shadow) memset(new_shadow, 0, (size_t)size);
     new_raw_owned = true;
   }
 
@@ -635,7 +664,8 @@ void _gl_BufferData(GLenum target, GLsizeiptr size, const GLvoid *data,
   buf->raw_owned = new_raw_owned;
   reset_mapping_state(buf);
 
-  if (size > 0 && !sync_raw_range(buf, 0, size)) {
+  /* Without data the contents are undefined: nothing to upload. */
+  if (size > 0 && data && !sync_raw_range(buf, 0, size)) {
     _gl_set_error(GL_OUT_OF_MEMORY);
   }
 }

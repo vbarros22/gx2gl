@@ -2892,8 +2892,9 @@ void gl_bind_program_fetch_shader(void) {
 
   for (uint32_t i = 0; i < buffer_count; ++i) {
     if (!buffers[i].in_use) continue;
-    DCFlushRange((void *)buffers[i].data_ptr, buffers[i].size);
-    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER,
+    /* Buffer writes flush the CPU cache themselves (sync_raw_range());
+     * flushing whole buffers at every draw cost milliseconds. */
+    GX2Invalidate(GX2_INVALIDATE_MODE_ATTRIBUTE_BUFFER,
                   (void *)buffers[i].data_ptr,
                   buffers[i].size);
     GX2SetAttribBuffer(buffers[i].gx2_index,
