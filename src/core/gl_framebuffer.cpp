@@ -20,6 +20,8 @@ extern "C" {
 
 void GX2ExpandAAColorBuffer(GX2ColorBuffer *colorBuffer);
 void GX2ExpandDepthBuffer(GX2DepthBuffer *depthBuffer);
+void GX2ConvertDepthBufferToTextureSurface(GX2DepthBuffer *src, GX2Surface *dst,
+                                           uint32_t dstMip, uint32_t dstSlice);
 #ifdef __cplusplus
 }
 #endif
@@ -93,6 +95,14 @@ typedef struct {
     bool color_buffer_owns_aux[8];
     GX2DepthBuffer db;
     bool depth_needs_expand;
+    /* A depth texture attachment is drawn into a tiled depth buffer
+     * (depth_target): the GPU can't use the texture's linear storage as a
+     * depth buffer. Before the texture is sampled the depth is converted to
+     * a tiled colour surface (depth_copy) and copied into it. */
+    bool depth_target_allocated;
+    GX2Surface depth_target;
+    GX2Surface depth_copy;
+    bool depth_needs_resolve;
     bool dirty;
 } GLFramebuffer;
 
@@ -293,6 +303,16 @@ static void free_texture_color_target(GLTextureColorTarget *target) {
     free_color_buffer_aux(&target->color_buffer);
     if (target->allocated) free_surface_storage(&target->surface);
     memset(target, 0, sizeof(*target));
+}
+
+static void free_framebuffer_depth_target(GLFramebuffer *fb) {
+    if (!fb) return;
+    if (fb->depth_target_allocated) {
+        free_surface_storage(&fb->depth_target);
+        free_surface_storage(&fb->depth_copy);
+    }
+    fb->depth_target_allocated = false;
+    fb->depth_needs_resolve = false;
 }
 
 static void free_framebuffer_texture_target(GLFramebuffer *fb, uint32_t index) {
@@ -1032,6 +1052,76 @@ static void init_depth_buffer_from_surface(GX2DepthBuffer *db, const GX2Surface 
     init_depth_buffer_from_surface_view(db, s, 0, 0, 1);
 }
 
+static bool create_depth_target_surface(GX2Surface *surface, const GX2Surface *like,
+                                        uint32_t width, uint32_t height, bool depth,
+                                        GLint internal_format) {
+    memset(surface, 0, sizeof(*surface));
+    surface->dim = GX2_SURFACE_DIM_TEXTURE_2D;
+    surface->width = width;
+    surface->height = height;
+    surface->depth = 1;
+    surface->mipLevels = 1;
+    surface->format = like->format;
+    surface->aa = GX2_AA_MODE1X;
+    surface->use = depth ? (GX2SurfaceUse)(GX2_SURFACE_USE_DEPTH_BUFFER | GX2_SURFACE_USE_TEXTURE)
+                         : (GX2SurfaceUse)(GX2_SURFACE_USE_COLOR_BUFFER | GX2_SURFACE_USE_TEXTURE);
+    surface->tileMode = GX2_TILE_MODE_DEFAULT;
+    GX2CalcSurfaceSizeAndAlignment(surface);
+    if (!GX2RCreateSurface(surface, build_framebuffer_surface_flags(internal_format, depth, true))) {
+        memset(surface, 0, sizeof(*surface));
+        return false;
+    }
+    return true;
+}
+
+/* Points fb->db at a tiled depth buffer for a 2D depth texture attachment.
+ * Returns false when the attachment isn't one this handles. */
+static bool setup_texture_depth_target(GLFramebuffer *fb, const GLAttachmentRef *attachment,
+                                       const GX2Texture *texture) {
+    if (!fb || !attachment || !texture || !texture->surface.image ||
+        texture->surface.dim != GX2_SURFACE_DIM_TEXTURE_2D ||
+        texture->surface.aa != GX2_AA_MODE1X || attachment->level < 0 ||
+        (uint32_t)attachment->level >= texture->surface.mipLevels) {
+        return false;
+    }
+    uint32_t width = texture_level_extent(texture->surface.width, attachment->level);
+    uint32_t height = texture_level_extent(texture->surface.height, attachment->level);
+    if (!fb->depth_target_allocated || fb->depth_target.width != width ||
+        fb->depth_target.height != height ||
+        fb->depth_target.format != texture->surface.format) {
+        GLint internal_format = gl_get_texture_internal_format(attachment->object);
+        free_framebuffer_depth_target(fb);
+        if (!create_depth_target_surface(&fb->depth_target, &texture->surface,
+                                         width, height, true, internal_format)) {
+            return false;
+        }
+        if (!create_depth_target_surface(&fb->depth_copy, &texture->surface,
+                                         width, height, false, internal_format)) {
+            free_surface_storage(&fb->depth_target);
+            return false;
+        }
+        fb->depth_target_allocated = true;
+    }
+    init_depth_buffer_from_surface(&fb->db, &fb->depth_target);
+    return true;
+}
+
+static void resolve_framebuffer_depth_texture(GLFramebuffer *fb) {
+    if (!fb || !fb->depth_needs_resolve || !fb->depth_target_allocated) return;
+    fb->depth_needs_resolve = false;
+    if (fb->depth_attachment.kind != GL_ATTACHMENT_KIND_TEXTURE) return;
+    GX2Texture *texture = gl_get_gx2_texture(fb->depth_attachment.object);
+    if (!texture || !texture->surface.image) return;
+    GX2DrawDone();
+    GX2ConvertDepthBufferToTextureSurface(&fb->db, &fb->depth_copy, 0, 0);
+    GX2CopySurface(&fb->depth_copy, 0, 0, &texture->surface,
+                   (uint32_t)fb->depth_attachment.level,
+                   attachment_view_slice(&fb->depth_attachment));
+    GX2DrawDone();
+    restore_context_after_surface_op();
+    invalidate_surface_after_color_write(&texture->surface);
+}
+
 typedef struct {
     GLsizei width;
     GLsizei height;
@@ -1204,10 +1294,11 @@ static GX2ColorBuffer *get_read_color_buffer(void) {
                 }
             }
             memset(&fb->db, 0, sizeof(fb->db));
+            if (fb->depth_attachment.kind != GL_ATTACHMENT_KIND_TEXTURE) free_framebuffer_depth_target(fb);
             if (attachment_ref_present(&fb->depth_attachment)) {
                 if (fb->depth_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE) {
                     GX2Texture *t = gl_get_gx2_texture(fb->depth_attachment.object);
-                    if (t) init_depth_buffer_from_surface_view(
+                    if (t && !setup_texture_depth_target(fb, &fb->depth_attachment, t)) init_depth_buffer_from_surface_view(
                                &fb->db, &t->surface, fb->depth_attachment.level,
                                attachment_view_slice(&fb->depth_attachment),
                                attachment_view_count(&fb->depth_attachment,
@@ -1314,6 +1405,7 @@ void gl_framebuffer_shutdown(void) {
             for (uint32_t j = 0; j < 8; ++j) {
                 free_framebuffer_texture_target(fb, j);
             }
+            free_framebuffer_depth_target(fb);
         }
     }
     for (uint32_t i = 1; i < MAX_RENDERBUFFERS; ++i) {
@@ -1420,6 +1512,7 @@ void _gl_DeleteFramebuffers(GLsizei n, const GLuint *fbs) {
                 for (uint32_t j = 0; j < 8; ++j) {
                     free_framebuffer_texture_target(&g_framebuffers[id], j);
                 }
+                free_framebuffer_depth_target(&g_framebuffers[id]);
             }
             memset(&g_framebuffers[id], 0, sizeof(GLFramebuffer));
         }
@@ -4012,10 +4105,11 @@ void gl_bind_framebuffers(void) {
             }
         }
         memset(&fb->db, 0, sizeof(fb->db));
+        if (fb->depth_attachment.kind != GL_ATTACHMENT_KIND_TEXTURE) free_framebuffer_depth_target(fb);
         if (attachment_ref_present(&fb->depth_attachment)) {
             if (fb->depth_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE) {
                 GX2Texture *t = gl_get_gx2_texture(fb->depth_attachment.object);
-                if (t) init_depth_buffer_from_surface_view(
+                if (t && !setup_texture_depth_target(fb, &fb->depth_attachment, t)) init_depth_buffer_from_surface_view(
                            &fb->db, &t->surface, fb->depth_attachment.level,
                            attachment_view_slice(&fb->depth_attachment),
                            attachment_view_count(&fb->depth_attachment,
@@ -4128,6 +4222,7 @@ void gl_framebuffer_mark_bound_color_dirty(void) {
         fb->db.surface.aa != GX2_AA_MODE1X) {
         fb->depth_needs_expand = true;
     }
+    if (fb->depth_target_allocated) fb->depth_needs_resolve = true;
 }
 
 void gl_framebuffer_mark_bound_color_buffer_dirty(GLuint index) {
@@ -4149,6 +4244,7 @@ void gl_framebuffer_mark_bound_color_buffer_dirty(GLuint index) {
         fb->db.surface.aa != GX2_AA_MODE1X) {
         fb->depth_needs_expand = true;
     }
+    if (fb->depth_target_allocated) fb->depth_needs_resolve = true;
 }
 
 void gl_framebuffer_sync_bound_color_targets(void) {
@@ -4171,6 +4267,11 @@ void gl_framebuffer_sync_texture_for_sampling(GLuint texture) {
                 resolve_framebuffer_texture_targets(fb);
                 break;
             }
+        }
+        if (fb->depth_needs_resolve &&
+            fb->depth_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE &&
+            fb->depth_attachment.object == texture) {
+            resolve_framebuffer_depth_texture(fb);
         }
         if (fb->depth_needs_expand &&
             ((fb->depth_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE &&
