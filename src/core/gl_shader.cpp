@@ -294,6 +294,23 @@ static bool is_private_fragment_uniform(const char *name) {
   return name && strcmp(name, "_gx2gl_frag_coord_height") == 0;
 }
 
+/* A uniform (or sampler) used by both stages is one active uniform in GL.
+ * gx2gl lists the vertex copy and hides the pixel copy, and writes through
+ * the vertex location go to both (see find_pixel_twin_location()). */
+static bool ps_uniform_shadowed(const GX2VertexShader *vs, const char *name) {
+  if (!vs || !name) return false;
+  for (uint32_t i = 0; i < vs->uniformVarCount; ++i)
+    if (vs->uniformVars[i].name && strcmp(vs->uniformVars[i].name, name) == 0) return true;
+  return false;
+}
+
+static bool ps_sampler_shadowed(const GX2VertexShader *vs, const char *name) {
+  if (!vs || !name) return false;
+  for (uint32_t i = 0; i < vs->samplerVarCount; ++i)
+    if (vs->samplerVars[i].name && strcmp(vs->samplerVars[i].name, name) == 0) return true;
+  return false;
+}
+
 static bool is_valid_shader(GLuint s) { return s > 0 && s < MAX_SHADERS && g_shaders[s].in_use; }
 static bool is_valid_program(GLuint p) { return p > 0 && p < MAX_PROGRAMS && g_programs[p].in_use; }
 
@@ -567,7 +584,10 @@ static uint32_t get_active_uniform_count(GLProgram *prog) {
   if (ps) {
     count += ps->uniformVarCount + ps->samplerVarCount;
     for (uint32_t i = 0; i < ps->uniformVarCount; ++i)
-      if (is_private_fragment_uniform(ps->uniformVars[i].name)) --count;
+      if (is_private_fragment_uniform(ps->uniformVars[i].name) ||
+          ps_uniform_shadowed(vs, ps->uniformVars[i].name)) --count;
+    for (uint32_t i = 0; i < ps->samplerVarCount; ++i)
+      if (ps_sampler_shadowed(vs, ps->samplerVars[i].name)) --count;
   }
   return count + prog->gs_only_count + prog->SourceUniformCount;
 }
@@ -598,6 +618,7 @@ static GLsizei get_active_uniform_max_name_length(GLProgram *prog) {
       if (length > max_length) max_length = length;
     }
     for (uint32_t i = 0; i < ps->samplerVarCount; ++i) {
+      if (ps_sampler_shadowed(vs, ps->samplerVars[i].name)) continue;
       GLsizei length = ps->samplerVars[i].name ? (GLsizei)strlen(ps->samplerVars[i].name) + 1 : 0;
       if (length > max_length) max_length = length;
     }
@@ -697,7 +718,8 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
   }
   if (ps) {
     for (uint32_t i = 0; i < ps->uniformVarCount; ++i) {
-      if (is_private_fragment_uniform(ps->uniformVars[i].name)) continue;
+      if (is_private_fragment_uniform(ps->uniformVars[i].name) ||
+          ps_uniform_shadowed(vs, ps->uniformVars[i].name)) continue;
       if (cursor++ != index) continue;
       info->name = ps->uniformVars[i].name;
       info->size = (GLint)shader_var_element_count(ps->uniformVars[i].count);
@@ -745,8 +767,9 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
     }
   }
   if (ps) {
-    for (uint32_t i = 0; i < ps->samplerVarCount; ++i, ++cursor) {
-      if (cursor != index) continue;
+    for (uint32_t i = 0; i < ps->samplerVarCount; ++i) {
+      if (ps_sampler_shadowed(vs, ps->samplerVars[i].name)) continue;
+      if (cursor++ != index) continue;
       info->name = ps->samplerVars[i].name;
       info->size = 1;
       info->type = sampler_var_type_to_gl_enum(ps->samplerVars[i].type);
@@ -783,10 +806,32 @@ static bool get_active_uniform_info(GLProgram *prog, GLuint index, ActiveUniform
   return false;
 }
 
-static GLint resolve_uniform_location(GLProgram *prog, GLint location) {
+/* The pixel shader's copy of a vertex uniform or sampler, or -1. */
+static GLint find_pixel_twin_location(GLProgram *prog, const char *name, bool sampler) {
+  GX2PixelShader *ps = prog && prog->group ? prog->group->pixelShader : NULL;
+  if (!ps || !name) return -1;
+  if (sampler) {
+    for (uint32_t i = 0; i < ps->samplerVarCount; ++i)
+      if (ps->samplerVars[i].name && strcmp(ps->samplerVars[i].name, name) == 0)
+        return make_sampler_location(true, (uint32_t)ps->samplerVars[i].location);
+    return -1;
+  }
+  for (uint32_t i = 0; i < ps->uniformVarCount; ++i) {
+    const GX2UniformVar *var = &ps->uniformVars[i];
+    if (!var->name || strcmp(var->name, name) != 0) continue;
+    return var->block < 0
+               ? make_direct_uniform_location(true, (uint32_t)var->offset)
+               : (GLint)(GL_LOCATION_STAGE_PIXEL | ((uint32_t)var->block << 16) |
+                         (uniform_var_offset(var) & 0xFFFFu));
+  }
+  return -1;
+}
+
+static GLint resolve_uniform_location(GLProgram *prog, GLint location, GLint *twin = NULL) {
   uint32_t count;
   ActiveUniformInfo info;
 
+  if (twin) *twin = -1;
   if (!prog || location <= 0) {
     return location;
   }
@@ -799,6 +844,9 @@ static GLint resolve_uniform_location(GLProgram *prog, GLint location) {
   if (!get_active_uniform_info(prog, (GLuint)(location - 1), &info)) {
     return location;
   }
+  if (twin && info.name && !location_is_pixel(info.location) &&
+      !location_is_geometry_only(info.location))
+    *twin = find_pixel_twin_location(prog, info.name, info.is_sampler);
   return info.location;
 }
 
@@ -2137,13 +2185,16 @@ static bool update_uniform_words(GLint location, const uint32_t *data,
   }
 
   GLProgram *prog = &g_programs[prog_id];
-  location = resolve_uniform_location(prog, location);
+  GLint twin;
+  location = resolve_uniform_location(prog, location, &twin);
   if (location_is_sampler(location)) return false;
   set_program_uniform_value_shadow(prog, location, data, (uint32_t)count_words);
   if (location_is_geometry_only(location)) {
     /* Copied into the geometry shader's uniforms at every draw. */
     return true;
   }
+  if (twin != -1)
+    write_uniform_storage_words(prog, twin, data, count_words, extra_offset_bytes);
   return write_uniform_storage_words(prog, location, data, count_words,
                                      extra_offset_bytes);
 }
@@ -2169,7 +2220,8 @@ static bool update_uniform_matrix(GLint location, GLsizei count,
   }
 
   GLProgram *prog = &g_programs[prog_id];
-  location = resolve_uniform_location(prog, location);
+  GLint twin;
+  location = resolve_uniform_location(prog, location, &twin);
   if (location_is_sampler(location)) return false;
 
   const uint32_t logical_words_per_matrix = columns * rows;
@@ -2210,6 +2262,8 @@ static bool update_uniform_matrix(GLint location, GLsizei count,
   bool ok = location_is_geometry_only(location) ||
             write_uniform_storage_words(prog, location, storage,
                                         (GLsizei)storage_word_count, 0);
+  if (twin != -1 && !location_is_geometry_only(location))
+    write_uniform_storage_words(prog, twin, storage, (GLsizei)storage_word_count, 0);
   if (logical != logical_stack) free(logical);
   if (storage != storage_stack) free(storage);
   return ok;
@@ -2226,8 +2280,16 @@ static bool update_sampler_bindings(GLint location, GLsizei count, const GLint *
   }
 
   GLProgram *prog = &g_programs[prog_id];
-  location = resolve_uniform_location(prog, location);
+  GLint twin;
+  location = resolve_uniform_location(prog, location, &twin);
   if (!location_is_sampler(location)) return false;
+  if (twin != -1 && location_is_sampler(twin)) {
+    uint32_t twin_base = (uint32_t)twin & 0xFFFFu;
+    for (GLsizei i = 0; i < count && twin_base + (uint32_t)i < MAX_PROGRAM_SAMPLERS; ++i) {
+      GLint slot = prog->pixel_sampler_units[twin_base + (uint32_t)i];
+      if (slot >= 0 && slot < MAX_PROGRAM_SAMPLERS) prog->pixel_sampler_bindings[slot] = values[i];
+    }
+  }
   GLint *sampler_units = location_is_pixel(location) ? prog->pixel_sampler_units : prog->vertex_sampler_units;
   GLint *sampler_bindings =
       location_is_pixel(location) ? prog->pixel_sampler_bindings : prog->vertex_sampler_bindings;
