@@ -1812,6 +1812,8 @@ static void flush_texture_storage(GX2Texture *texture) {
  * flushed here, as the upload writes and flushes all of it. For a 1024x512
  * lightmap that was a third of the upload time. */
 static bool g_storage_filled_by_caller;
+/* glTexStorage leaves contents undefined: skip zeroing the new storage. */
+static bool g_storage_contents_undefined;
 
 static bool rebuild_texture_storage_impl(GLTexture *tex, GLsizei width,
                                     GLsizei height, GLsizei depth,
@@ -1884,7 +1886,8 @@ static bool rebuild_texture_storage_impl(GLTexture *tex, GLsizei width,
     }
     log_texture_step("rebuild_texture_storage: image allocation ok ptr=%p",
                      new_texture.surface.image);
-    if (!(g_storage_filled_by_caller && mip_levels == 1)) {
+    if (!g_storage_contents_undefined &&
+        !(g_storage_filled_by_caller && mip_levels == 1)) {
       memset(new_texture.surface.image, 0, new_texture.surface.imageSize);
     }
     log_texture_step("rebuild_texture_storage: image cleared");
@@ -1904,8 +1907,7 @@ static bool rebuild_texture_storage_impl(GLTexture *tex, GLsizei width,
     }
     log_texture_step("rebuild_texture_storage: mip allocation ok ptr=%p",
                      new_texture.surface.mipmaps);
-    memset(new_texture.surface.mipmaps, 0, new_texture.surface.mipmapSize);
-    log_texture_step("rebuild_texture_storage: mipmaps cleared");
+    /* Mip levels are filled by uploads or glGenerateMipmap. */
   }
 
   old_texture = tex->gx2_texture;
@@ -1947,7 +1949,8 @@ static bool rebuild_texture_storage_impl(GLTexture *tex, GLsizei width,
     clear_texture_level_state(tex);
   }
 
-  if (!(g_storage_filled_by_caller && mip_levels == 1)) {
+  if (!g_storage_contents_undefined &&
+      !(g_storage_filled_by_caller && mip_levels == 1)) {
     flush_texture_storage(&tex->gx2_texture);
   }
 
@@ -5480,10 +5483,13 @@ void _gl_TexStorage2D(GLenum target, GLsizei levels, GLenum internalformat,
     _gl_set_error(GL_INVALID_VALUE);
     return;
   }
-  if (!rebuild_texture_storage(tex, width, height,
+  g_storage_contents_undefined = true;
+  bool storage_ok = rebuild_texture_storage(tex, width, height,
                                target == GL_TEXTURE_CUBE_MAP ? 6 : 1,
                                (GLint)internalformat, (uint32_t)levels,
-                               false)) {
+                               false);
+  g_storage_contents_undefined = false;
+  if (!storage_ok) {
     _gl_set_error(GL_OUT_OF_MEMORY);
     return;
   }

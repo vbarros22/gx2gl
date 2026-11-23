@@ -533,18 +533,20 @@ static void resolve_framebuffer_texture_targets(GLFramebuffer *fb) {
         }
 
         target = &fb->texture_targets[i];
-        GX2DrawDone();
         if (texture->surface.aa != GX2_AA_MODE1X) {
+            GX2DrawDone();
             GX2ExpandAAColorBuffer(&fb->cb[i]);
             GX2DrawDone();
             restore_context_after_surface_op();
         } else if (target->allocated && target->surface.image) {
             uint32_t slice = attachment_view_slice(&fb->color_attachments[i]);
+            /* Flush the colour cache on the GPU instead of stalling the CPU. */
+            GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER,
+                          target->surface.image, target->surface.imageSize);
             GX2CopySurface(&target->surface, 0, slice,
                            &texture->surface,
                            (uint32_t)fb->color_attachments[i].level,
                            slice);
-            GX2DrawDone();
             restore_context_after_surface_op();
         }
         invalidate_surface_after_color_write(&texture->surface);
@@ -1113,12 +1115,14 @@ static void resolve_framebuffer_depth_texture(GLFramebuffer *fb) {
     if (fb->depth_attachment.kind != GL_ATTACHMENT_KIND_TEXTURE) return;
     GX2Texture *texture = gl_get_gx2_texture(fb->depth_attachment.object);
     if (!texture || !texture->surface.image) return;
-    GX2DrawDone();
+    GX2Invalidate(GX2_INVALIDATE_MODE_DEPTH_BUFFER,
+                  fb->depth_target.image, fb->depth_target.imageSize);
     GX2ConvertDepthBufferToTextureSurface(&fb->db, &fb->depth_copy, 0, 0);
+    GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER,
+                  fb->depth_copy.image, fb->depth_copy.imageSize);
     GX2CopySurface(&fb->depth_copy, 0, 0, &texture->surface,
                    (uint32_t)fb->depth_attachment.level,
                    attachment_view_slice(&fb->depth_attachment));
-    GX2DrawDone();
     restore_context_after_surface_op();
     invalidate_surface_after_color_write(&texture->surface);
 }
@@ -3551,7 +3555,9 @@ static bool blit_depth_targets_on_gpu(GLint srcX0, GLint srcY0, GLint srcX1, GLi
     if (srcX0 != 0 || srcY0 != 0 || dstX0 != 0 || dstY0 != 0 ||
         srcX1 != (GLint)a->width || dstX1 != (GLint)a->width ||
         srcY1 != (GLint)a->height || dstY1 != (GLint)a->height) return false;
+    GX2Invalidate(GX2_INVALIDATE_MODE_DEPTH_BUFFER, a->image, a->imageSize);
     GX2CopySurface(a, 0, 0, b, 0, 0);
+    GX2Invalidate(GX2_INVALIDATE_MODE_DEPTH_BUFFER, b->image, b->imageSize);
     restore_context_after_surface_op();
     dst->depth_needs_resolve = true;
     return true;
