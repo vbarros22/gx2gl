@@ -533,6 +533,9 @@ static void resolve_framebuffer_texture_targets(GLFramebuffer *fb) {
         }
 
         target = &fb->texture_targets[i];
+        g_gl_wait_tag_w = texture->surface.width;
+        g_gl_wait_tag_h = texture->surface.height;
+        g_gl_wait_tag_fmt = texture->surface.format;
         GX2DrawDone();
         if (texture->surface.aa != GX2_AA_MODE1X) {
             GX2ExpandAAColorBuffer(&fb->cb[i]);

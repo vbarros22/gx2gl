@@ -43,6 +43,8 @@ void gl_stats_set_vsync(uint32_t vsync_us);
 #include <gx2/event.h>
 /* GX2DrawDone(), timed into g_gl_frame_stats; the macro below routes the
  * calls of every file that includes this header after the GX2 ones. */
+/* The surface the next GX2DrawDone() waits to use, for the wait log. */
+extern uint32_t g_gl_wait_tag_w, g_gl_wait_tag_h, g_gl_wait_tag_fmt;
 static inline void gl_stats_draw_done(const char *file, int line)
 {
     gl_stats_time_t start = GL_STATS_NOW();
@@ -55,6 +57,15 @@ static inline void gl_stats_draw_done(const char *file, int line)
         g_gl_frame_stats.slowest_wait_file = file;
         g_gl_frame_stats.slowest_wait_line = line;
     }
+    if (g_gl_frame_stats.wait_log_count < 32) {
+        uint32_t i = g_gl_frame_stats.wait_log_count++;
+        g_gl_frame_stats.wait_log[i].us = us;
+        g_gl_frame_stats.wait_log[i].line = line;
+        g_gl_frame_stats.wait_log[i].width = g_gl_wait_tag_w;
+        g_gl_frame_stats.wait_log[i].height = g_gl_wait_tag_h;
+        g_gl_frame_stats.wait_log[i].format = g_gl_wait_tag_fmt;
+    }
+    g_gl_wait_tag_w = g_gl_wait_tag_h = g_gl_wait_tag_fmt = 0;
 }
 #define GX2DrawDone() gl_stats_draw_done(__FILE__, __LINE__)
 #endif

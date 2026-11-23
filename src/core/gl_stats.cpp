@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+uint32_t g_gl_wait_tag_w, g_gl_wait_tag_h, g_gl_wait_tag_fmt;
+
 extern "C" {
 
 GX2GL_FrameStats g_gl_frame_stats;

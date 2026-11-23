@@ -37,6 +37,14 @@ typedef struct GX2GL_FrameStats
     uint32_t slowest_wait_us;
     const char *slowest_wait_file;
     int slowest_wait_line;
+    /* Every GX2DrawDone() of the frame, in order (the first 32): where, how
+     * long, and the surface it was waiting to use (0x0 when unknown). */
+    uint32_t wait_log_count;
+    struct {
+        uint32_t us;
+        int line;
+        uint32_t width, height, format;
+    } wait_log[32];
 } GX2GL_FrameStats;
 
 /* The counts of the last frame GX2GL_Present() finished. */
