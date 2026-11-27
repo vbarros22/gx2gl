@@ -607,10 +607,13 @@ GLboolean gl_state_cpu_clear_draw_color_buffer(GLuint index,
 
 void _gl_ClearColor(GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha) {
   if (!g_gl_context) return;
-  g_gl_context->clear_color[0] = clamp01f(red);
-  g_gl_context->clear_color[1] = clamp01f(green);
-  g_gl_context->clear_color[2] = clamp01f(blue);
-  g_gl_context->clear_color[3] = clamp01f(alpha);
+  /* GL 3.0+: the clear color is not clamped here. Normalized targets are
+   * clamped when the clear happens; float targets need the raw value
+   * (e.g. a distance-field buffer cleared to a large distance). */
+  g_gl_context->clear_color[0] = red;
+  g_gl_context->clear_color[1] = green;
+  g_gl_context->clear_color[2] = blue;
+  g_gl_context->clear_color[3] = alpha;
 }
 
 void _gl_ClearDepth(GLclampd depth) {
@@ -1352,15 +1355,30 @@ static void emit_scissor_state(void) {
                 (uint32_t)scissor.height);
 }
 
+static bool blend_eq_ignores_factors(GLenum eq) {
+  return eq == GL_MIN || eq == GL_MAX;
+}
+
 static void emit_blend_state(void) {
+  /* GL ignores the blend factors for MIN/MAX, but the hardware applies
+   * them, so force ONE there (as radeonsi does). */
+  GLenum src_rgb = blend_eq_ignores_factors(g_gl_context->blend_eq_rgb)
+                       ? GL_ONE : g_gl_context->blend_src_rgb;
+  GLenum dst_rgb = blend_eq_ignores_factors(g_gl_context->blend_eq_rgb)
+                       ? GL_ONE : g_gl_context->blend_dst_rgb;
+  GLenum src_alpha = blend_eq_ignores_factors(g_gl_context->blend_eq_alpha)
+                         ? GL_ONE : g_gl_context->blend_src_alpha;
+  GLenum dst_alpha = blend_eq_ignores_factors(g_gl_context->blend_eq_alpha)
+                         ? GL_ONE : g_gl_context->blend_dst_alpha;
+
   for (GLuint i = 0; i < 8; ++i) {
     GX2SetBlendControl((GX2RenderTarget)i,
-                       map_blend_factor(g_gl_context->blend_src_rgb),
-                       map_blend_factor(g_gl_context->blend_dst_rgb),
+                       map_blend_factor(src_rgb),
+                       map_blend_factor(dst_rgb),
                        map_blend_equation(g_gl_context->blend_eq_rgb),
                        g_gl_context->blend_enabled ? GX2_ENABLE : GX2_DISABLE,
-                       map_blend_factor(g_gl_context->blend_src_alpha),
-                       map_blend_factor(g_gl_context->blend_dst_alpha),
+                       map_blend_factor(src_alpha),
+                       map_blend_factor(dst_alpha),
                        map_blend_equation(g_gl_context->blend_eq_alpha));
   }
 
