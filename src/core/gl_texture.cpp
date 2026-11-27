@@ -5093,7 +5093,7 @@ void _gl_DeleteTextures(GLsizei n, const GLuint *textures) {
     GLuint id = textures[i];
     if (id > 0 && id < MAX_TEXTURES &&
         (g_textures[id].reserved || g_textures[id].in_use)) {
-      gl_framebuffer_mark_texture_dirty(id);
+      gl_framebuffer_forget_texture(id);
       for (int u = 0; u < GL33_MAX_TEXTURE_UNITS; u++) {
         if (g_gl_context->bound_texture_1d[u] == id) {
           g_gl_context->bound_texture_1d[u] = 0;

@@ -541,7 +541,14 @@ static void resolve_framebuffer_texture_targets(GLFramebuffer *fb) {
             GX2ExpandAAColorBuffer(&fb->cb[i]);
             GX2DrawDone();
             restore_context_after_surface_op();
-        } else if (target->allocated && target->surface.image) {
+        } else if (target->allocated && target->surface.image &&
+                   target->surface.format == texture->surface.format &&
+                   target->surface.width ==
+                       texture_level_extent(texture->surface.width,
+                                            fb->color_attachments[i].level) &&
+                   target->surface.height ==
+                       texture_level_extent(texture->surface.height,
+                                            fb->color_attachments[i].level)) {
             uint32_t slice = attachment_view_slice(&fb->color_attachments[i]);
             GX2CopySurface(&target->surface, 0, slice,
                            &texture->surface,
@@ -4322,6 +4329,50 @@ void gl_framebuffer_sync_texture_for_sampling(GLuint texture) {
             GX2DrawDone();
             restore_context_after_surface_op();
             fb->depth_needs_expand = false;
+        }
+    }
+}
+
+/* A deleted texture's name is reused by the next glGenTextures. Attachments
+ * are kept by name, so without this a stale render target of a deleted
+ * texture got resolved (GX2CopySurface) into whatever texture took the name
+ * next: wrong contents on screen and writes past a smaller new surface. */
+void gl_framebuffer_forget_texture(GLuint texture) {
+    if (texture == 0) return;
+    for (uint32_t i = 0; i < MAX_FRAMEBUFFERS; ++i) {
+        GLFramebuffer *fb = &g_framebuffers[i];
+        bool detached = false;
+        if (!fb->in_use) continue;
+        for (uint32_t j = 0; j < 8; ++j) {
+            if (fb->color_attachments[j].kind == GL_ATTACHMENT_KIND_TEXTURE &&
+                fb->color_attachments[j].object == texture) {
+                clear_attachment_ref(&fb->color_attachments[j]);
+                free_framebuffer_texture_target(fb, j);
+                detached = true;
+            }
+        }
+        if (fb->depth_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE &&
+            fb->depth_attachment.object == texture) {
+            clear_attachment_ref(&fb->depth_attachment);
+            detached = true;
+        }
+        if (fb->stencil_attachment.kind == GL_ATTACHMENT_KIND_TEXTURE &&
+            fb->stencil_attachment.object == texture) {
+            clear_attachment_ref(&fb->stencil_attachment);
+            detached = true;
+        }
+        if (!detached) continue;
+        if (fb->depth_attachment.kind == GL_ATTACHMENT_KIND_NONE &&
+            fb->stencil_attachment.kind == GL_ATTACHMENT_KIND_NONE) {
+            free_framebuffer_depth_target(fb);
+            memset(&fb->db, 0, sizeof(fb->db));
+            fb->depth_needs_expand = false;
+        }
+        fb->dirty = true;
+        if (g_gl_context &&
+            (g_gl_context->bound_framebuffer == i ||
+             g_gl_context->bound_read_framebuffer == i)) {
+            g_gl_context->dirty_flags |= GL_DIRTY_FRAMEBUFFER;
         }
     }
 }

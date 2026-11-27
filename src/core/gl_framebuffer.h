@@ -48,6 +48,7 @@ void gl_framebuffer_mark_bound_color_buffer_dirty(GLuint index);
 void gl_framebuffer_sync_bound_color_targets(void);
 void gl_framebuffer_sync_texture_for_sampling(GLuint texture);
 void gl_framebuffer_mark_texture_dirty(GLuint texture);
+void gl_framebuffer_forget_texture(GLuint texture);
 GLboolean gl_read_color_pixels_rgba8(GLint x, GLint y, GLsizei width, GLsizei height, void *pixels);
 
 #ifdef __cplusplus
