@@ -828,27 +828,66 @@ static GLint find_pixel_twin_location(GLProgram *prog, const char *name, bool sa
   return -1;
 }
 
-static GLint resolve_uniform_location(GLProgram *prog, GLint location, GLint *twin = NULL) {
+/*
+ * Public uniform locations: each active uniform gets a run of consecutive
+ * locations, one per array element (GL requires arr[i] == arr[0] + i).
+ * Locations above that range are internal locations and pass through.
+ */
+static GLint uniform_element_count(const ActiveUniformInfo *info) {
+  return info->size > 1 ? info->size : 1;
+}
+
+static GLint resolve_uniform_location(GLProgram *prog, GLint location, GLint *twin = NULL,
+                                      uint32_t *element = NULL) {
   uint32_t count;
+  GLint base = 1;
   ActiveUniformInfo info;
 
   if (twin) *twin = -1;
+  if (element) *element = 0;
   if (!prog || location <= 0) {
     return location;
   }
 
   count = get_active_uniform_count(prog);
-  if ((uint32_t)location > count) {
-    return location;
+  for (uint32_t i = 0; i < count; ++i) {
+    if (!get_active_uniform_info(prog, i, &info)) {
+      base += 1;
+      continue;
+    }
+    GLint n = uniform_element_count(&info);
+    if (location >= base && location < base + n) {
+      if (element) *element = (uint32_t)(location - base);
+      if (twin && info.name && !location_is_pixel(info.location) &&
+          !location_is_geometry_only(info.location))
+        *twin = find_pixel_twin_location(prog, info.name, info.is_sampler);
+      return info.location;
+    }
+    base += n;
   }
+  return location;
+}
 
-  if (!get_active_uniform_info(prog, (GLuint)(location - 1), &info)) {
-    return location;
-  }
-  if (twin && info.name && !location_is_pixel(info.location) &&
-      !location_is_geometry_only(info.location))
-    *twin = find_pixel_twin_location(prog, info.name, info.is_sampler);
-  return info.location;
+/* Byte distance between array elements of the uniform at an internal
+ * location: every element starts on a vec4 register. */
+static bool get_uniform_var_by_location(GLProgram *prog, GLint location,
+                                        bool *pixel_stage,
+                                        GX2ShaderVarType *type,
+                                        uint32_t *block_index,
+                                        uint32_t *offset,
+                                        uint32_t *word_count,
+                                        uint32_t *element_count);
+static uint32_t shader_var_type_storage_word_count(GX2ShaderVarType type);
+
+static uint32_t uniform_element_stride_bytes(GLProgram *prog, GLint location) {
+  GX2ShaderVarType type;
+  uint32_t words;
+
+  if (!get_uniform_var_by_location(prog, location, NULL, &type, NULL, NULL,
+                                   NULL, NULL))
+    return 16u;
+  words = shader_var_type_storage_word_count(type);
+  return ((words + 3u) / 4u) * 16u;
 }
 
 static GLint get_sampler_uniform_binding(GLProgram *prog, GLint location) {
@@ -1125,6 +1164,17 @@ static void free_program_uniform_value_shadows(GLProgram *prog) {
   free(prog->uniform_value_shadows);
   prog->uniform_value_shadows = NULL;
   prog->uniform_value_shadow_count = 0;
+}
+
+static void drop_program_uniform_value_shadow(GLProgram *prog, GLint location) {
+  if (!prog) return;
+  for (uint32_t i = 0; i < prog->uniform_value_shadow_count; ++i) {
+    if (prog->uniform_value_shadows[i].location == location) {
+      free(prog->uniform_value_shadows[i].words);
+      prog->uniform_value_shadows[i].words = NULL;
+      prog->uniform_value_shadows[i].word_count = 0;
+    }
+  }
 }
 
 static bool set_program_uniform_value_shadow(GLProgram *prog, GLint location,
@@ -2187,9 +2237,17 @@ static bool update_uniform_words(GLint location, const uint32_t *data,
 
   GLProgram *prog = &g_programs[prog_id];
   GLint twin;
-  location = resolve_uniform_location(prog, location, &twin);
+  uint32_t element;
+  location = resolve_uniform_location(prog, location, &twin, &element);
   if (location_is_sampler(location)) return false;
-  set_program_uniform_value_shadow(prog, location, data, (uint32_t)count_words);
+  if (element) {
+    /* An element past [0]: the per-location value shadow can't describe
+     * it, so drop the shadow and write the storage at the element. */
+    extra_offset_bytes += element * uniform_element_stride_bytes(prog, location);
+    drop_program_uniform_value_shadow(prog, location);
+  } else {
+    set_program_uniform_value_shadow(prog, location, data, (uint32_t)count_words);
+  }
   if (location_is_geometry_only(location)) {
     /* Copied into the geometry shader's uniforms at every draw. */
     return true;
@@ -2222,8 +2280,11 @@ static bool update_uniform_matrix(GLint location, GLsizei count,
 
   GLProgram *prog = &g_programs[prog_id];
   GLint twin;
-  location = resolve_uniform_location(prog, location, &twin);
+  uint32_t element;
+  location = resolve_uniform_location(prog, location, &twin, &element);
   if (location_is_sampler(location)) return false;
+  const uint32_t element_offset_bytes =
+      element * uniform_element_stride_bytes(prog, location);
 
   const uint32_t logical_words_per_matrix = columns * rows;
   const uint32_t storage_words_per_matrix = columns * 4u;
@@ -2259,12 +2320,17 @@ static bool update_uniform_matrix(GLint location, GLsizei count,
     }
   }
 
-  set_program_uniform_value_shadow(prog, location, logical, logical_word_count);
+  if (element)
+    drop_program_uniform_value_shadow(prog, location);
+  else
+    set_program_uniform_value_shadow(prog, location, logical, logical_word_count);
   bool ok = location_is_geometry_only(location) ||
             write_uniform_storage_words(prog, location, storage,
-                                        (GLsizei)storage_word_count, 0);
+                                        (GLsizei)storage_word_count,
+                                        element_offset_bytes);
   if (twin != -1 && !location_is_geometry_only(location))
-    write_uniform_storage_words(prog, twin, storage, (GLsizei)storage_word_count, 0);
+    write_uniform_storage_words(prog, twin, storage, (GLsizei)storage_word_count,
+                                element_offset_bytes);
   if (logical != logical_stack) free(logical);
   if (storage != storage_stack) free(storage);
   return ok;
@@ -2282,8 +2348,11 @@ static bool update_sampler_bindings(GLint location, GLsizei count, const GLint *
 
   GLProgram *prog = &g_programs[prog_id];
   GLint twin;
-  location = resolve_uniform_location(prog, location, &twin);
+  uint32_t element;
+  location = resolve_uniform_location(prog, location, &twin, &element);
   if (!location_is_sampler(location)) return false;
+  location += (GLint)element;
+  if (twin != -1) twin += (GLint)element;
   if (twin != -1 && location_is_sampler(twin)) {
     uint32_t twin_base = (uint32_t)twin & 0xFFFFu;
     for (GLsizei i = 0; i < count && twin_base + (uint32_t)i < MAX_PROGRAM_SAMPLERS; ++i) {
@@ -3851,6 +3920,20 @@ void _gl_GetShaderSource(GLuint s, GLsizei b, GLsizei *l, GLchar *src) {
   if (!is_valid_shader(s)) return;
   copy_gl_string(g_shaders[s].source, b, l, src);
 }
+/* glGetUniform* returns one element of the uniform at a location: never
+ * write more than that, even when the shadow holds the whole array. */
+static uint32_t clamp_uniform_words(GLProgram *prog, GLint location,
+                                    uint32_t actual_words) {
+  GX2ShaderVarType type;
+  uint32_t elem;
+
+  if (!get_uniform_var_by_location(prog, location, NULL, &type, NULL, NULL,
+                                   NULL))
+    return actual_words;
+  elem = shader_var_type_word_count(type);
+  return (elem && elem < actual_words) ? elem : actual_words;
+}
+
 void _gl_GetUniformfv(GLuint p, GLint l, GLfloat *v) {
   uint32_t words[16];
   uint32_t actual_words = 0;
@@ -3869,6 +3952,7 @@ void _gl_GetUniformfv(GLuint p, GLint l, GLfloat *v) {
   if (get_program_uniform_value_shadow(&g_programs[p], l, words,
                                        (uint32_t)(sizeof(words) / sizeof(words[0])),
                                        &actual_words)) {
+    actual_words = clamp_uniform_words(&g_programs[p], l, actual_words);
     for (uint32_t i = 0; i < actual_words; ++i) {
       memcpy(&v[i], &words[i], sizeof(GLfloat));
     }
@@ -3877,6 +3961,7 @@ void _gl_GetUniformfv(GLuint p, GLint l, GLfloat *v) {
   if (read_uniform_words(&g_programs[p], l, words,
                          (uint32_t)(sizeof(words) / sizeof(words[0])),
                          &actual_words, NULL)) {
+    actual_words = clamp_uniform_words(&g_programs[p], l, actual_words);
     for (uint32_t i = 0; i < actual_words; ++i) {
       memcpy(&v[i], &words[i], sizeof(GLfloat));
     }
@@ -3903,6 +3988,7 @@ void _gl_GetUniformiv(GLuint p, GLint l, GLint *v) {
   if (get_program_uniform_value_shadow(&g_programs[p], l, words,
                                        (uint32_t)(sizeof(words) / sizeof(words[0])),
                                        &actual_words)) {
+    actual_words = clamp_uniform_words(&g_programs[p], l, actual_words);
     for (uint32_t i = 0; i < actual_words; ++i) {
       v[i] = (GLint)words[i];
     }
@@ -3911,6 +3997,7 @@ void _gl_GetUniformiv(GLuint p, GLint l, GLint *v) {
   if (read_uniform_words(&g_programs[p], l, words,
                          (uint32_t)(sizeof(words) / sizeof(words[0])),
                          &actual_words, NULL)) {
+    actual_words = clamp_uniform_words(&g_programs[p], l, actual_words);
     for (uint32_t i = 0; i < actual_words; ++i) {
       v[i] = (GLint)words[i];
     }
@@ -3937,6 +4024,7 @@ void _gl_GetUniformuiv(GLuint program, GLint location, GLuint *params) {
   if (get_program_uniform_value_shadow(&g_programs[program], location, words,
                                        (uint32_t)(sizeof(words) / sizeof(words[0])),
                                        &actual_words)) {
+    actual_words = clamp_uniform_words(&g_programs[program], location, actual_words);
     for (uint32_t i = 0; i < actual_words; ++i) {
       params[i] = words[i];
     }
@@ -3945,6 +4033,7 @@ void _gl_GetUniformuiv(GLuint program, GLint location, GLuint *params) {
   if (read_uniform_words(&g_programs[program], location, words,
                          (uint32_t)(sizeof(words) / sizeof(words[0])),
                          &actual_words, NULL)) {
+    actual_words = clamp_uniform_words(&g_programs[program], location, actual_words);
     for (uint32_t i = 0; i < actual_words; ++i) {
       params[i] = words[i];
     }
@@ -4023,21 +4112,38 @@ GLint _gl_GetUniformLocation(GLuint p, const GLchar *name) {
   if (!prog->group) return -1;
 
   count = get_active_uniform_count(prog);
+  GLint base = 1;
   for (uint32_t i = 0; i < count; ++i) {
     ActiveUniformInfo info;
-    if (!get_active_uniform_info(prog, i, &info) || !info.name) {
+    if (!get_active_uniform_info(prog, i, &info)) {
+      base += 1;
       continue;
     }
-    if (strcmp(info.name, name) == 0) {
-      return (GLint)i + 1;
+    if (!info.name) {
+      base += uniform_element_count(&info);
+      continue;
     }
+    GLint n = uniform_element_count(&info);
     size_t info_name_length = strlen(info.name);
-    size_t query_name_length = strlen(name);
-    if (query_name_length == info_name_length + 3u &&
-        strncmp(info.name, name, info_name_length) == 0 &&
-        strcmp(name + info_name_length, "[0]") == 0) {
-      return (GLint)i + 1;
+    /* Reflection may already name arrays "x[0]": match on the base name. */
+    if (info_name_length > 3u &&
+        strcmp(info.name + info_name_length - 3u, "[0]") == 0)
+      info_name_length -= 3u;
+    if (strncmp(info.name, name, info_name_length) == 0) {
+      const char *rest = name + info_name_length;
+      if (rest[0] == '\0') {
+        return base;
+      }
+      if (rest[0] == '[') {
+        char *end = NULL;
+        long element = strtol(rest + 1, &end, 10);
+        if (end && end[0] == ']' && end[1] == '\0' && element >= 0 &&
+            element < n) {
+          return base + (GLint)element;
+        }
+      }
     }
+    base += n;
   }
   return -1;
 }
