@@ -370,7 +370,10 @@ gl_context_t* gl_context_create(void);
 void gl_context_destroy(gl_context_t *ctx);
 void _gl_Flush(void);
 void _gl_Finish(void);
-void _gl_set_error(GLenum error);
+void _gl_set_error_at(GLenum error, const char *site);
+/* Records which function raised the first pending error
+ * (see GX2GL_GetLastErrorSite). */
+#define _gl_set_error(error) _gl_set_error_at((error), __func__)
 const GLubyte* _gl_GetString(GLenum name);
 const GLubyte* _gl_GetStringi(GLenum name, GLuint index);
 void _gl_GetBooleanv(GLenum pname, GLboolean *params);

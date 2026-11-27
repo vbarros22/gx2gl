@@ -50,6 +50,10 @@ typedef struct GX2GL_FrameStats
 /* The counts of the last frame GX2GL_Present() finished. */
 void GX2GL_GetFrameStats(GX2GL_FrameStats *stats);
 
+/* Name of the gx2gl function that raised the most recent first GL error
+ * (the one glGetError returns next), or "" if none was recorded. */
+const char *GX2GL_GetLastErrorSite(void);
+
 #ifdef __cplusplus
 }
 #endif

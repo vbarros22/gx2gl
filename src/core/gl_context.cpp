@@ -150,12 +150,21 @@ static void gl_context_init_defaults(gl_context_t *ctx) {
   ctx->dirty_flags = 0xFFFFFFFF;
 }
 
-void _gl_set_error(GLenum error) {
+static const char *g_last_error_site;
+
+void _gl_set_error_at(GLenum error, const char *site) {
   if (!g_gl_context || error == GL_NO_ERROR) return;
 
   OSLockMutex(&g_gl_context->error_mutex);
-  if (g_gl_context->error == GL_NO_ERROR) g_gl_context->error = error;
+  if (g_gl_context->error == GL_NO_ERROR) {
+    g_gl_context->error = error;
+    g_last_error_site = site;
+  }
   OSUnlockMutex(&g_gl_context->error_mutex);
+}
+
+extern "C" const char *GX2GL_GetLastErrorSite(void) {
+  return g_last_error_site ? g_last_error_site : "";
 }
 
 GLenum glGetError(void) {
