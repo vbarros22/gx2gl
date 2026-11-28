@@ -534,7 +534,17 @@ static bool draw_elements_checked(GX2PrimitiveMode prim, GLsizei count,
 
   if (prepared_count > 0) {
     set_restart_index_for_draw();
-    if (prim == GX2_PRIMITIVE_MODE_TRIANGLES && prepared_count > 12288) {
+    // Index data that lives in a GL buffer is already in GPU-visible memory,
+    // so it can be drawn directly whatever its size. Only indices we built
+    // ourselves (owned, freed right after this call) have to be copied into
+    // the command buffer, and large ones are split to keep each immediate
+    // packet small. Large buffer-backed U32 draws used to go through the
+    // immediate path and came out mostly missing.
+    if (!prepared.owned_indices && !index_info->widen_u8) {
+      GX2DrawIndexedEx(prim, (uint32_t)prepared_count, prepared.gx2_type,
+                       prepared.indices, (uint32_t)basevertex,
+                       (uint32_t)instancecount);
+    } else if (prim == GX2_PRIMITIVE_MODE_TRIANGLES && prepared_count > 12288) {
       const size_t IndexBytes = GetPreparedIndexSize(&prepared);
       for (uint32_t Start = 0; Start < (uint32_t)prepared_count; Start += 3072) {
         uint32_t Count = (uint32_t)prepared_count - Start;
